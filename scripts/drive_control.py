@@ -63,7 +63,7 @@ def main():
     node = rclpy.create_node('keyboard_drive')
     pub = node.create_publisher(Twist, TOPIC, 10)
 
-    print(f'\nW/S = +/- {LIN} m/s  |  A/D = +/- {ANG} rad/s')
+    print(f'\nW/S = +/- {LIN} m/s  |  A=右转 D=左转 {ANG} rad/s')
     print('Hold = move.  Release = stop.  Q = quit.\n')
 
     # ts[0]=W, [1]=S, [2]=A, [3]=D    (lists are mutable across threads)
@@ -96,11 +96,11 @@ def main():
             else:
                 vx = 0.0
 
-            # Angular: last A/D wins
+            # Angular: last A/D wins  (A=右转 +ANG, D=左转 -ANG)
             if a_on and (not d_on or ts[2] >= ts[3]):
-                vz = ANG
-            elif d_on:
                 vz = -ANG
+            elif d_on:
+                vz = ANG
             else:
                 vz = 0.0
 
