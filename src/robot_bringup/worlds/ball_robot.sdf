@@ -218,7 +218,7 @@
       <material><ambient>0.45 0.45 0.45</ambient><diffuse>0.55 0.55 0.55</diffuse></material></visual></link></model>
 
 <!-- ====== 差速轮式机器人 ====== -->
-<model name="robot"><model name="robot">
+<model name="robot">
   <pose>0 0 0.20 0 0 0</pose>
 
   <!-- ============================================================
