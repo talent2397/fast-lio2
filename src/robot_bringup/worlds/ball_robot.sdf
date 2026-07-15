@@ -219,7 +219,7 @@
 
 <!-- ====== 差速轮式机器人 ====== -->
 <model name="robot">
-  <pose>0 0 0.55 0 0 0</pose>
+  <pose>0 0 0.35 0 0 0</pose>
 
   <!-- 底盘 base_link -->
   <link name="base_link">
@@ -290,8 +290,8 @@
     <right_joint>rear_right_joint</right_joint>
     <wheel_separation>0.5</wheel_separation>
     <wheel_radius>0.2</wheel_radius>
-    <max_linear_acceleration>2.0</max_linear_acceleration>
-    <max_angular_acceleration>3.0</max_angular_acceleration>
+    <max_linear_acceleration>0.8</max_linear_acceleration>
+    <max_angular_acceleration>1.5</max_angular_acceleration>
     <odom_publish_frequency>30</odom_publish_frequency>
   </plugin>
 
@@ -306,7 +306,7 @@
 
   <!-- 后左驱动轮 -->
   <link name="rear_left_wheel">
-    <pose>-0.25 -0.25 -0.35 0 0 0</pose>
+    <pose>-0.25 -0.25 -0.15 0 0 0</pose>
     <inertial>
       <mass>0.8</mass>
       <inertia><ixx>0.008</ixx><iyy>0.008</iyy><izz>0.016</izz></inertia>
@@ -314,7 +314,7 @@
     <collision name="c">
       <pose>0 0 0 -1.5707 0 0</pose>
       <geometry><cylinder><radius>0.2</radius><length>0.06</length></cylinder></geometry>
-      <surface><friction><ode><mu>100</mu><mu2>100</mu2></ode></friction></surface>
+      <surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface>
     </collision>
     <visual name="v">
       <pose>0 0 0 -1.5707 0 0</pose>
@@ -329,7 +329,7 @@
 
   <!-- 后右驱动轮 -->
   <link name="rear_right_wheel">
-    <pose>-0.25 0.25 -0.35 0 0 0</pose>
+    <pose>-0.25 0.25 -0.15 0 0 0</pose>
     <inertial>
       <mass>0.8</mass>
       <inertia><ixx>0.008</ixx><iyy>0.008</iyy><izz>0.016</izz></inertia>
@@ -337,7 +337,7 @@
     <collision name="c">
       <pose>0 0 0 -1.5707 0 0</pose>
       <geometry><cylinder><radius>0.2</radius><length>0.06</length></cylinder></geometry>
-      <surface><friction><ode><mu>100</mu><mu2>100</mu2></ode></friction></surface>
+      <surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface>
     </collision>
     <visual name="v">
       <pose>0 0 0 -1.5707 0 0</pose>
@@ -352,7 +352,7 @@
 
   <!-- 前左从动轮 (revolute, 低摩擦自由滚动) -->
   <link name="front_left_wheel">
-    <pose>0.32 -0.25 -0.35 0 0 0</pose>
+    <pose>0.32 -0.25 -0.15 0 0 0</pose>
     <inertial>
       <mass>0.5</mass>
       <inertia><ixx>0.005</ixx><iyy>0.005</iyy><izz>0.010</izz></inertia>
@@ -375,7 +375,7 @@
 
   <!-- 前右从动轮 -->
   <link name="front_right_wheel">
-    <pose>0.32 0.25 -0.35 0 0 0</pose>
+    <pose>0.32 0.25 -0.15 0 0 0</pose>
     <inertial>
       <mass>0.5</mass>
       <inertia><ixx>0.005</ixx><iyy>0.005</iyy><izz>0.010</izz></inertia>
