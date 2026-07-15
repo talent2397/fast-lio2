@@ -295,19 +295,29 @@
     <odom_publish_frequency>30</odom_publish_frequency>
   </plugin>
 
-  <!-- ====== 后左驱动轮 ====== -->
-  <!-- cylinder 默认轴沿 Z, pitch=1.5707 + yaw=1.5707 旋转为沿 Y 轴滚动 -->
+  <!-- ================================================================
+  轮子建模原则:
+  - link 不设旋转，保证关节轴 <xyz>0 1 0</xyz> = 世界 Y 轴
+  - collision/visual 内部用 roll=-1.5707 把 cylinder (默认Z轴) 翻到 Y 轴
+  - 四轮统一 radius=0.2, length=0.06
+  - 后轮: revolute + 高摩擦 (驱动轮)
+  - 前轮: revolute + 低摩擦 (从动轮)
+  ================================================================ -->
+
+  <!-- 后左驱动轮 -->
   <link name="rear_left_wheel">
-    <pose>-0.25 -0.25 -0.35 0 1.5707 1.5707</pose>
+    <pose>-0.25 -0.25 -0.35 0 0 0</pose>
     <inertial>
       <mass>0.8</mass>
-      <inertia><ixx>0.008</ixx><iyy>0.016</iyy><izz>0.008</izz></inertia>
+      <inertia><ixx>0.008</ixx><iyy>0.008</iyy><izz>0.016</izz></inertia>
     </inertial>
     <collision name="c">
+      <pose>0 0 0 -1.5707 0 0</pose>
       <geometry><cylinder><radius>0.2</radius><length>0.06</length></cylinder></geometry>
       <surface><friction><ode><mu>100</mu><mu2>100</mu2></ode></friction></surface>
     </collision>
     <visual name="v">
+      <pose>0 0 0 -1.5707 0 0</pose>
       <geometry><cylinder><radius>0.2</radius><length>0.06</length></cylinder></geometry>
       <material><ambient>0.1 0.1 0.1</ambient><diffuse>0.2 0.2 0.2</diffuse></material>
     </visual>
@@ -317,18 +327,20 @@
     <axis><xyz>0 1 0</xyz></axis>
   </joint>
 
-  <!-- ====== 后右驱动轮 ====== -->
+  <!-- 后右驱动轮 -->
   <link name="rear_right_wheel">
-    <pose>-0.25 0.25 -0.35 0 1.5707 1.5707</pose>
+    <pose>-0.25 0.25 -0.35 0 0 0</pose>
     <inertial>
       <mass>0.8</mass>
-      <inertia><ixx>0.008</ixx><iyy>0.016</iyy><izz>0.008</izz></inertia>
+      <inertia><ixx>0.008</ixx><iyy>0.008</iyy><izz>0.016</izz></inertia>
     </inertial>
     <collision name="c">
+      <pose>0 0 0 -1.5707 0 0</pose>
       <geometry><cylinder><radius>0.2</radius><length>0.06</length></cylinder></geometry>
       <surface><friction><ode><mu>100</mu><mu2>100</mu2></ode></friction></surface>
     </collision>
     <visual name="v">
+      <pose>0 0 0 -1.5707 0 0</pose>
       <geometry><cylinder><radius>0.2</radius><length>0.06</length></cylinder></geometry>
       <material><ambient>0.1 0.1 0.1</ambient><diffuse>0.2 0.2 0.2</diffuse></material>
     </visual>
@@ -338,44 +350,50 @@
     <axis><xyz>0 1 0</xyz></axis>
   </joint>
 
-  <!-- ====== 前左从动轮 (ball 关节万向转动) ====== -->
-  <link name="front_left_caster">
-    <pose>0.32 -0.25 -0.38 0 1.5707 1.5707</pose>
+  <!-- 前左从动轮 (revolute, 低摩擦自由滚动) -->
+  <link name="front_left_wheel">
+    <pose>0.32 -0.25 -0.35 0 0 0</pose>
     <inertial>
-      <mass>0.05</mass>
-      <inertia><ixx>0.0001</ixx><iyy>0.00016</iyy><izz>0.0001</izz></inertia>
+      <mass>0.5</mass>
+      <inertia><ixx>0.005</ixx><iyy>0.005</iyy><izz>0.010</izz></inertia>
     </inertial>
     <collision name="c">
-      <geometry><cylinder><radius>0.08</radius><length>0.04</length></cylinder></geometry>
-      <surface><friction><ode><mu>0</mu><mu2>0</mu2></ode></friction></surface>
+      <pose>0 0 0 -1.5707 0 0</pose>
+      <geometry><cylinder><radius>0.2</radius><length>0.06</length></cylinder></geometry>
+      <surface><friction><ode><mu>0.1</mu><mu2>0.1</mu2></ode></friction></surface>
     </collision>
     <visual name="v">
-      <geometry><cylinder><radius>0.08</radius><length>0.04</length></cylinder></geometry>
+      <pose>0 0 0 -1.5707 0 0</pose>
+      <geometry><cylinder><radius>0.2</radius><length>0.06</length></cylinder></geometry>
       <material><ambient>0.12 0.12 0.12</ambient><diffuse>0.18 0.18 0.18</diffuse></material>
     </visual>
   </link>
-  <joint name="front_left_caster_joint" type="ball">
-    <parent>base_link</parent><child>front_left_caster</child>
+  <joint name="front_left_joint" type="revolute">
+    <parent>base_link</parent><child>front_left_wheel</child>
+    <axis><xyz>0 1 0</xyz></axis>
   </joint>
 
-  <!-- ====== 前右从动轮 ====== -->
-  <link name="front_right_caster">
-    <pose>0.32 0.25 -0.38 0 1.5707 1.5707</pose>
+  <!-- 前右从动轮 -->
+  <link name="front_right_wheel">
+    <pose>0.32 0.25 -0.35 0 0 0</pose>
     <inertial>
-      <mass>0.05</mass>
-      <inertia><ixx>0.0001</ixx><iyy>0.00016</iyy><izz>0.0001</izz></inertia>
+      <mass>0.5</mass>
+      <inertia><ixx>0.005</ixx><iyy>0.005</iyy><izz>0.010</izz></inertia>
     </inertial>
     <collision name="c">
-      <geometry><cylinder><radius>0.08</radius><length>0.04</length></cylinder></geometry>
-      <surface><friction><ode><mu>0</mu><mu2>0</mu2></ode></friction></surface>
+      <pose>0 0 0 -1.5707 0 0</pose>
+      <geometry><cylinder><radius>0.2</radius><length>0.06</length></cylinder></geometry>
+      <surface><friction><ode><mu>0.1</mu><mu2>0.1</mu2></ode></friction></surface>
     </collision>
     <visual name="v">
-      <geometry><cylinder><radius>0.08</radius><length>0.04</length></cylinder></geometry>
+      <pose>0 0 0 -1.5707 0 0</pose>
+      <geometry><cylinder><radius>0.2</radius><length>0.06</length></cylinder></geometry>
       <material><ambient>0.12 0.12 0.12</ambient><diffuse>0.18 0.18 0.18</diffuse></material>
     </visual>
   </link>
-  <joint name="front_right_caster_joint" type="ball">
-    <parent>base_link</parent><child>front_right_caster</child>
+  <joint name="front_right_joint" type="revolute">
+    <parent>base_link</parent><child>front_right_wheel</child>
+    <axis><xyz>0 1 0</xyz></axis>
   </joint>
 </model>
 
