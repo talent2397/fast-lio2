@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.8)
+project(livox_ros_driver2)
+find_package(ament_cmake REQUIRED)
+install(DIRECTORY include/ DESTINATION include)
+ament_package()

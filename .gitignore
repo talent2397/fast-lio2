@@ -1,0 +1,30 @@
+# Build artifacts
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.pyc
+
+# FAST-LIO runtime artifacts
+PCD/
+src/FAST_LIO_ROS2/PCD/
+src/FAST_LIO_ROS2/Log/
+*.pcd
+
+# FAST-LIO docs (large assets, not needed for build)
+src/FAST_LIO_ROS2/doc/
+src/FAST_LIO_ROS2/rviz_cfg/
+src/FAST_LIO_ROS2/frames_*
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# ROS
+*.log
