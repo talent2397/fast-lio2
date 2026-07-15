@@ -218,19 +218,28 @@
       <material><ambient>0.45 0.45 0.45</ambient><diffuse>0.55 0.55 0.55</diffuse></material></visual></link></model>
 
 <!-- ====== 差速轮式机器人 ====== -->
-<model name="robot">
+<model name="robot"><model name="robot">
   <pose>0 0 0.20 0 0 0</pose>
 
-  <!-- base_link: 车身，原点 = 轮轴高度 -->
+  <!-- ============================================================
+       base_link: 轮轴中心点 (Z=0.20 in world, r=0.2 wheel touches ground)
+       车身尺寸: 0.9m(长) x 0.6m(宽) x 0.3m(高)
+       轮距: 0.60m (Y=±0.30)
+       wheel_radius: 0.20m
+  ============================================================ -->
+
   <link name="base_link">
-    <inertial><mass>8.0</mass><inertia><ixx>1.5</ixx><iyy>1.5</iyy><izz>2.0</izz></inertia></inertial>
-    <!-- 车身壳体: 抬升到轮轴上方 -->
-    <collision name="c">
+    <inertial>
+      <mass>8.0</mass>
+      <inertia><ixx>1.5</ixx><iyy>1.5</iyy><izz>2.0</izz></inertia>
+    </inertial>
+    <!-- 车身 (轮轴上方) -->
+    <collision name="body_collision">
       <pose>0 0 0.22 0 0 0</pose>
       <geometry><box><size>0.9 0.6 0.3</size></box></geometry>
       <surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface>
     </collision>
-    <visual name="v">
+    <visual name="body_visual">
       <pose>0 0 0.22 0 0 0</pose>
       <geometry><box><size>0.9 0.6 0.3</size></box></geometry>
       <material><ambient>0.2 0.25 0.45</ambient><diffuse>0.3 0.35 0.6</diffuse></material>
@@ -241,24 +250,25 @@
       <always_on>1</always_on>
       <update_rate>400</update_rate>
     </sensor>
-    <visual name="imu_tag"><pose>0.25 0.12 0.22 0 0 0</pose>
-      <geometry><box><size>0.05 0.04 0.03</size></box></geometry>
-      <material><ambient>0.1 0.3 0.9</ambient><diffuse>0.1 0.4 1.0</diffuse></material></visual>
   </link>
 
-  <!-- LiDAR: 车身顶部 -->
+  <!-- ====== LiDAR: 车顶中央 ====== -->
   <link name="lidar_link">
-    <pose>0 0 0.42 0 0 0</pose>
+    <pose>0 0 0.40 0 0 0</pose>
     <inertial><mass>0.3</mass><inertia><ixx>0.01</ixx><iyy>0.01</iyy><izz>0.01</izz></inertia></inertial>
-    <visual name="v"><geometry><cylinder><radius>0.08</radius><length>0.08</length></cylinder></geometry>
-      <material><ambient>0.1 0.1 0.1</ambient><diffuse>0.15 0.15 0.15</diffuse></material></visual>
+    <visual name="lidar_visual">
+      <geometry><cylinder><radius>0.08</radius><length>0.08</length></cylinder></geometry>
+      <material><ambient>0.1 0.1 0.1</ambient><diffuse>0.2 0.2 0.2</diffuse></material>
+    </visual>
     <sensor name="lidar_sensor" type="gpu_lidar">
       <topic>/robot/lidar</topic>
       <update_rate>10</update_rate>
       <lidar>
         <scan>
-          <horizontal><samples>900</samples><resolution>1</resolution><min_angle>-3.14159</min_angle><max_angle>3.14159</max_angle></horizontal>
-          <vertical><samples>16</samples><resolution>1</resolution><min_angle>-0.261799</min_angle><max_angle>0.261799</max_angle></vertical>
+          <horizontal><samples>900</samples><resolution>1</resolution>
+            <min_angle>-3.14159</min_angle><max_angle>3.14159</max_angle></horizontal>
+          <vertical><samples>16</samples><resolution>1</resolution>
+            <min_angle>-0.261799</min_angle><max_angle>0.261799</max_angle></vertical>
         </scan>
         <range><min>0.3</min><max>50.0</max><resolution>0.02</resolution></range>
         <noise><type>gaussian</type><mean>0</mean><stddev>0.03</stddev></noise>
@@ -267,14 +277,20 @@
       <visualize>true</visualize>
     </sensor>
   </link>
-  <joint name="lidar_joint" type="fixed"><parent>base_link</parent><child>lidar_link</child></joint>
+  <joint name="lidar_joint" type="fixed">
+    <parent>base_link</parent>
+    <child>lidar_link</child>
+  </joint>
 
-  <!-- Camera: 车身前方顶部 -->
+  <!-- ====== Camera: 车身前方 ====== -->
   <link name="camera_link">
-    <pose>0.40 0 0.35 0 0 0</pose>
-    <inertial><mass>0.05</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
-    <visual name="v"><geometry><box><size>0.06 0.04 0.03</size></box></geometry>
-      <material><ambient>0.05 0.05 0.05</ambient><diffuse>0.1 0.1 0.1</diffuse></material></visual>
+    <pose>0.42 0 0.30 0 0 0</pose>
+    <inertial><mass>0.05</mass>
+      <inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
+    <visual name="camera_visual">
+      <geometry><box><size>0.06 0.04 0.03</size></box></geometry>
+      <material><ambient>0.1 0.1 0.1</ambient><diffuse>0.2 0.2 0.2</diffuse></material>
+    </visual>
     <sensor name="camera_sensor" type="camera">
       <topic>/robot/camera</topic>
       <camera>
@@ -287,114 +303,111 @@
       <visualize>true</visualize>
     </sensor>
   </link>
-  <joint name="camera_joint" type="fixed"><parent>base_link</parent><child>camera_link</child></joint>
+  <joint name="camera_joint" type="fixed">
+    <parent>base_link</parent>
+    <child>camera_link</child>
+  </joint>
 
-  <!-- DiffDrive: 两后轮驱动，轮距=1.0m，半径=0.2m -->
+  <!-- ====== DiffDrive 插件 ====== -->
   <plugin filename="gz-sim-diff-drive-system" name="gz::sim::systems::DiffDrive">
     <left_joint>rear_left_joint</left_joint>
     <right_joint>rear_right_joint</right_joint>
-    <wheel_separation>1.0</wheel_separation>
-    <wheel_radius>0.2</wheel_radius>
+    <wheel_separation>0.60</wheel_separation>
+    <wheel_radius>0.20</wheel_radius>
     <max_linear_acceleration>0.8</max_linear_acceleration>
     <max_angular_acceleration>1.5</max_angular_acceleration>
     <odom_publish_frequency>30</odom_publish_frequency>
   </plugin>
 
-  <!-- ====== 四轮：统一 r=0.2, 在车身两侧(Y=±0.50) ====== -->
-  <!-- collision/visual 内 roll=-1.5707 把 cylinder Z轴→Y轴 -->
-
-  <!-- 后左驱动轮 -->
+  <!-- ====== 后左驱动轮 ====== -->
   <link name="rear_left_wheel">
-    <pose>-0.25 -0.50 0.00 0 0 0</pose>
-    <inertial>
-      <mass>0.8</mass>
-      <inertia><ixx>0.008</ixx><iyy>0.008</iyy><izz>0.016</izz></inertia>
-    </inertial>
+    <pose>-0.25 -0.30 0.00 0 0 0</pose>
+    <inertial><mass>0.8</mass>
+      <inertia><ixx>0.008</ixx><iyy>0.008</iyy><izz>0.016</izz></inertia></inertial>
     <collision name="c">
       <pose>0 0 0 -1.5707 0 0</pose>
-      <geometry><cylinder><radius>0.2</radius><length>0.06</length></cylinder></geometry>
+      <geometry><cylinder><radius>0.20</radius><length>0.06</length></cylinder></geometry>
       <surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface>
     </collision>
     <visual name="v">
       <pose>0 0 0 -1.5707 0 0</pose>
-      <geometry><cylinder><radius>0.2</radius><length>0.06</length></cylinder></geometry>
-      <material><ambient>0.1 0.1 0.1</ambient><diffuse>0.2 0.2 0.2</diffuse></material>
+      <geometry><cylinder><radius>0.20</radius><length>0.06</length></cylinder></geometry>
+      <material><ambient>0.15 0.15 0.15</ambient><diffuse>0.25 0.25 0.25</diffuse></material>
     </visual>
   </link>
   <joint name="rear_left_joint" type="revolute">
-    <parent>base_link</parent><child>rear_left_wheel</child>
+    <parent>base_link</parent>
+    <child>rear_left_wheel</child>
     <axis><xyz>0 1 0</xyz></axis>
   </joint>
 
-  <!-- 后右驱动轮 -->
+  <!-- ====== 后右驱动轮 ====== -->
   <link name="rear_right_wheel">
-    <pose>-0.25 0.50 0.00 0 0 0</pose>
-    <inertial>
-      <mass>0.8</mass>
-      <inertia><ixx>0.008</ixx><iyy>0.008</iyy><izz>0.016</izz></inertia>
-    </inertial>
+    <pose>-0.25 0.30 0.00 0 0 0</pose>
+    <inertial><mass>0.8</mass>
+      <inertia><ixx>0.008</ixx><iyy>0.008</iyy><izz>0.016</izz></inertia></inertial>
     <collision name="c">
       <pose>0 0 0 -1.5707 0 0</pose>
-      <geometry><cylinder><radius>0.2</radius><length>0.06</length></cylinder></geometry>
+      <geometry><cylinder><radius>0.20</radius><length>0.06</length></cylinder></geometry>
       <surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface>
     </collision>
     <visual name="v">
       <pose>0 0 0 -1.5707 0 0</pose>
-      <geometry><cylinder><radius>0.2</radius><length>0.06</length></cylinder></geometry>
-      <material><ambient>0.1 0.1 0.1</ambient><diffuse>0.2 0.2 0.2</diffuse></material>
+      <geometry><cylinder><radius>0.20</radius><length>0.06</length></cylinder></geometry>
+      <material><ambient>0.15 0.15 0.15</ambient><diffuse>0.25 0.25 0.25</diffuse></material>
     </visual>
   </link>
   <joint name="rear_right_joint" type="revolute">
-    <parent>base_link</parent><child>rear_right_wheel</child>
+    <parent>base_link</parent>
+    <child>rear_right_wheel</child>
     <axis><xyz>0 1 0</xyz></axis>
   </joint>
 
-  <!-- 前左从动轮 -->
+  <!-- ====== 前左从动轮 ====== -->
   <link name="front_left_wheel">
-    <pose>0.32 -0.50 0.00 0 0 0</pose>
-    <inertial>
-      <mass>0.5</mass>
-      <inertia><ixx>0.005</ixx><iyy>0.005</iyy><izz>0.010</izz></inertia>
-    </inertial>
+    <pose>0.32 -0.30 0.00 0 0 0</pose>
+    <inertial><mass>0.5</mass>
+      <inertia><ixx>0.005</ixx><iyy>0.005</iyy><izz>0.010</izz></inertia></inertial>
     <collision name="c">
       <pose>0 0 0 -1.5707 0 0</pose>
-      <geometry><cylinder><radius>0.2</radius><length>0.06</length></cylinder></geometry>
+      <geometry><cylinder><radius>0.20</radius><length>0.06</length></cylinder></geometry>
       <surface><friction><ode><mu>0.1</mu><mu2>0.1</mu2></ode></friction></surface>
     </collision>
     <visual name="v">
       <pose>0 0 0 -1.5707 0 0</pose>
-      <geometry><cylinder><radius>0.2</radius><length>0.06</length></cylinder></geometry>
-      <material><ambient>0.12 0.12 0.12</ambient><diffuse>0.18 0.18 0.18</diffuse></material>
+      <geometry><cylinder><radius>0.20</radius><length>0.06</length></cylinder></geometry>
+      <material><ambient>0.12 0.12 0.12</ambient><diffuse>0.20 0.20 0.20</diffuse></material>
     </visual>
   </link>
   <joint name="front_left_joint" type="revolute">
-    <parent>base_link</parent><child>front_left_wheel</child>
+    <parent>base_link</parent>
+    <child>front_left_wheel</child>
     <axis><xyz>0 1 0</xyz></axis>
   </joint>
 
-  <!-- 前右从动轮 -->
+  <!-- ====== 前右从动轮 ====== -->
   <link name="front_right_wheel">
-    <pose>0.32 0.50 0.00 0 0 0</pose>
-    <inertial>
-      <mass>0.5</mass>
-      <inertia><ixx>0.005</ixx><iyy>0.005</iyy><izz>0.010</izz></inertia>
-    </inertial>
+    <pose>0.32 0.30 0.00 0 0 0</pose>
+    <inertial><mass>0.5</mass>
+      <inertia><ixx>0.005</ixx><iyy>0.005</iyy><izz>0.010</izz></inertia></inertial>
     <collision name="c">
       <pose>0 0 0 -1.5707 0 0</pose>
-      <geometry><cylinder><radius>0.2</radius><length>0.06</length></cylinder></geometry>
+      <geometry><cylinder><radius>0.20</radius><length>0.06</length></cylinder></geometry>
       <surface><friction><ode><mu>0.1</mu><mu2>0.1</mu2></ode></friction></surface>
     </collision>
     <visual name="v">
       <pose>0 0 0 -1.5707 0 0</pose>
-      <geometry><cylinder><radius>0.2</radius><length>0.06</length></cylinder></geometry>
-      <material><ambient>0.12 0.12 0.12</ambient><diffuse>0.18 0.18 0.18</diffuse></material>
+      <geometry><cylinder><radius>0.20</radius><length>0.06</length></cylinder></geometry>
+      <material><ambient>0.12 0.12 0.12</ambient><diffuse>0.20 0.20 0.20</diffuse></material>
     </visual>
   </link>
   <joint name="front_right_joint" type="revolute">
-    <parent>base_link</parent><child>front_right_wheel</child>
+    <parent>base_link</parent>
+    <child>front_right_wheel</child>
     <axis><xyz>0 1 0</xyz></axis>
   </joint>
 </model>
+
 
   </world>
 </sdf>
