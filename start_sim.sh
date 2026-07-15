@@ -50,6 +50,18 @@ ros2 run tf2_ros static_transform_publisher 0 0 0 0 0 0 camera_init robot/odom
 
 sleep 1
 
+# 窗口3.5: YOLO 检测
+gnome-terminal --title="3.5-YOLO" -- bash -c "
+source /opt/ros/jazzy/setup.bash
+source $WS/install/setup.bash 2>/dev/null
+echo '等待 Camera 就绪...'
+sleep 8
+echo 'YOLOv8 目标检测 (COCO预训练, sports ball + chair)'
+ros2 run robot_vision yolo_detector --ros-args -p model:=yolov8n.pt -p inference_every:=3
+" &
+
+sleep 1
+
 # 窗口4: FAST-LIO2
 gnome-terminal --title="4-FAST-LIO2" -- bash -c "
 source /opt/ros/jazzy/setup.bash

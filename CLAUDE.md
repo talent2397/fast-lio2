@@ -92,6 +92,12 @@ INIT → EXPLORE → VERIFY → NAVIGATE → REACHED
                     NOT_FOUND (探索完成未找到 → 日志输出)
 ```
 
+## 系统环境
+
+- **sudo 密码**：`1`
+- **pip 安装**：需要 `--break-system-packages` 参数（Ubuntu 24.04 PEP 668）
+- **YOLO 策略**：先使用 COCO 预训练权重（含 ball、chair 类别），仿真验证通过后再采集真实数据微调
+
 ## Git 规范
 
 - 远程：`git@github.com:talent2397/fast-lio2.git`
