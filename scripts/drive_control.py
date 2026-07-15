@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Simple WASD keyboard control — hold to move, release to stop"""
+"""WASD keyboard control — hold to move, release to stop"""
 import os
 import select
 import termios
@@ -9,14 +9,12 @@ from time import time
 import rclpy
 from geometry_msgs.msg import Twist
 
-LIN = 3.0
+LIN = 2.0
 ANG = 2.0
 
-# Linux key-repeat: ~660ms initial delay, then ~33ms repeat interval.
-# We must survive the 660ms gap between first press and first repeat.
-# After repeats are flowing, we can use a shorter window for release detection.
-INITIAL_GRACE = 0.70   # covers the first-repeat gap
-REPEAT_WINDOW  = 0.20   # once repeats confirmed, release is detected fast
+# Key-repeat timing (Linux defaults: ~660ms initial gap, ~33ms repeat)
+FIRST_HOLD = 0.80   # survive the initial 660ms gap before first repeat
+FAST_CHECK = 0.20   # after first repeat confirmed, fast release detection
 
 
 def main():
@@ -36,70 +34,106 @@ def main():
     print(f'W/S = ±{LIN} m/s | A/D = ±{ANG} rad/s | Q = quit')
     print('Hold key to move, release to stop')
 
+    # Per-key state: last timestamp and whether repeat is confirmed
+    keys = {
+        'w': {'ts': 0.0, 'vx':  LIN, 'confirmed': False},
+        's': {'ts': 0.0, 'vx': -LIN, 'confirmed': False},
+        'a': {'ts': 0.0, 'vz':  ANG, 'confirmed': False},
+        'd': {'ts': 0.0, 'vz': -ANG, 'confirmed': False},
+    }
+
     vx = 0.0
     vz = 0.0
-    last_linear = 0.0
-    last_angular = 0.0
-    linear_primed = False   # switched to short timeout after seeing first repeat
-    angular_primed = False
 
     try:
         while rclpy.ok():
-            r, _, _ = select.select([fd], [], [], 0.03)
+            r, _, _ = select.select([fd], [], [], 0.02)
             now = time()
-
-            # Snapshot before processing new events (for repeat-detection)
-            prev_linear = last_linear
-            prev_angular = last_angular
+            got_keys = False
 
             if r:
                 data = os.read(fd, 64)
                 if not data:
                     break
+                got_keys = True
                 for b in data:
                     c = chr(b).lower()
                     if c in ('q', '\x03'):
-                        vx = 0.0
-                        vz = 0.0
-                        msg = Twist()
-                        pub.publish(msg)
+                        pub.publish(Twist())
                         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
                         os.close(fd)
                         node.destroy_node()
                         rclpy.shutdown()
                         return
-                    elif c == 'w':
-                        vx = LIN
-                        last_linear = now
-                    elif c == 's':
-                        vx = -LIN
-                        last_linear = now
-                    elif c == 'a':
-                        vz = -ANG    # A = 右转
-                        last_angular = now
-                    elif c == 'd':
-                        vz = ANG     # D = 左转
-                        last_angular = now
+                    if c in keys:
+                        prev_ts = keys[c]['ts']
+                        keys[c]['ts'] = now
+                        # Second event within 0.15s → repeat confirmed
+                        if not keys[c]['confirmed'] and prev_ts > 0.0 and now - prev_ts < 0.15:
+                            keys[c]['confirmed'] = True
 
-            # Two events on same axis close together (< 0.10 s) →
-            # key-repeat is flowing, switch to fast release detection.
-            # prev_linear > 0 guards against the first-ever press
-            # (prev_linear was 0, so condition fails → stays in grace period).
-            if not linear_primed and vx != 0.0 and prev_linear > 0.0 and now - prev_linear < 0.10:
-                linear_primed = True
-            if not angular_primed and vz != 0.0 and prev_angular > 0.0 and now - prev_angular < 0.10:
-                angular_primed = True
+            # Compute velocity: latest W/S wins for vx, latest A/D wins for vz
+            vx = 0.0
+            vz = 0.0
 
-            # Per-axis timeout — long grace until first repeat arrives
-            linear_limit = REPEAT_WINDOW if linear_primed else INITIAL_GRACE
-            angular_limit = REPEAT_WINDOW if angular_primed else INITIAL_GRACE
+            # Linear (W/S): pick the key with the most recent timestamp that hasn't expired
+            w_info = keys['w']
+            s_info = keys['s']
+            w_active = w_info['ts'] > 0.0
+            s_active = s_info['ts'] > 0.0
 
-            if vx != 0.0 and now - last_linear > linear_limit:
-                vx = 0.0
-                linear_primed = False
-            if vz != 0.0 and now - last_angular > angular_limit:
-                vz = 0.0
-                angular_primed = False
+            if w_active:
+                timeout = FAST_CHECK if w_info['confirmed'] else FIRST_HOLD
+                if now - w_info['ts'] > timeout:
+                    w_info['ts'] = 0.0
+                    w_info['confirmed'] = False
+                    w_active = False
+            if s_active:
+                timeout = FAST_CHECK if s_info['confirmed'] else FIRST_HOLD
+                if now - s_info['ts'] > timeout:
+                    s_info['ts'] = 0.0
+                    s_info['confirmed'] = False
+                    s_active = False
+
+            if w_active and s_active:
+                # Both recently pressed → last one wins
+                if w_info['ts'] > s_info['ts']:
+                    vx = w_info['vx']
+                else:
+                    vx = s_info['vx']
+            elif w_active:
+                vx = w_info['vx']
+            elif s_active:
+                vx = s_info['vx']
+
+            # Angular (A/D)
+            a_info = keys['a']
+            d_info = keys['d']
+            a_active = a_info['ts'] > 0.0
+            d_active = d_info['ts'] > 0.0
+
+            if a_active:
+                timeout = FAST_CHECK if a_info['confirmed'] else FIRST_HOLD
+                if now - a_info['ts'] > timeout:
+                    a_info['ts'] = 0.0
+                    a_info['confirmed'] = False
+                    a_active = False
+            if d_active:
+                timeout = FAST_CHECK if d_info['confirmed'] else FIRST_HOLD
+                if now - d_info['ts'] > timeout:
+                    d_info['ts'] = 0.0
+                    d_info['confirmed'] = False
+                    d_active = False
+
+            if a_active and d_active:
+                if a_info['ts'] > d_info['ts']:
+                    vz = a_info['vz']
+                else:
+                    vz = d_info['vz']
+            elif a_active:
+                vz = a_info['vz']
+            elif d_active:
+                vz = d_info['vz']
 
             msg = Twist()
             msg.linear.x = vx
@@ -109,10 +143,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        msg = Twist()
-        msg.linear.x = 0.0
-        msg.angular.z = 0.0
-        pub.publish(msg)
+        pub.publish(Twist())
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
         os.close(fd)
         node.destroy_node()
