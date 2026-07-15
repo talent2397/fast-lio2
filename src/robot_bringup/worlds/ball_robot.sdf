@@ -339,6 +339,7 @@
     <parent>base_link</parent>
     <child>rear_left_wheel</child>
     <axis><xyz>0 1 0</xyz></axis>
+    <dynamics><damping>3.0</damping><friction>2.0</friction></dynamics>
   </joint>
 
   <!-- ====== 后右驱动轮 ====== -->
@@ -361,6 +362,7 @@
     <parent>base_link</parent>
     <child>rear_right_wheel</child>
     <axis><xyz>0 1 0</xyz></axis>
+    <dynamics><damping>3.0</damping><friction>2.0</friction></dynamics>
   </joint>
 
   <!-- ====== 前左从动轮 ====== -->
@@ -383,6 +385,7 @@
     <parent>base_link</parent>
     <child>front_left_wheel</child>
     <axis><xyz>0 1 0</xyz></axis>
+    <dynamics><damping>2.0</damping><friction>1.0</friction></dynamics>
   </joint>
 
   <!-- ====== 前右从动轮 ====== -->
@@ -405,6 +408,7 @@
     <parent>base_link</parent>
     <child>front_right_wheel</child>
     <axis><xyz>0 1 0</xyz></axis>
+    <dynamics><damping>2.0</damping><friction>1.0</friction></dynamics>
   </joint>
 </model>
 
