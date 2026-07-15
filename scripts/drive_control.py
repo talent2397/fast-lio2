@@ -31,7 +31,7 @@ def main():
 
     rclpy.init()
     node = rclpy.create_node('keyboard_drive')
-    pub = node.create_publisher(Twist, '/cmd_vel', 10)
+    pub = node.create_publisher(Twist, '/robot/cmd_vel', 10)
 
     print(f'W/S = ±{LIN} m/s | A/D = ±{ANG} rad/s | Q = quit')
     print('Hold key to move, release to stop')

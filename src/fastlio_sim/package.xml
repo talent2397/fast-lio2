@@ -3,7 +3,7 @@
   <name>fastlio_sim</name>
   <version>0.1.0</version>
   <description>Gazebo simulation environment for FAST-LIO2</description>
-  <maintainer email="c@robot.local">c</maintainer>
+  <maintainer email="talent2397@gmail.com">c</maintainer>
   <license>Apache-2.0</license>
   <exec_depend>ros_gz_sim</exec_depend>
   <exec_depend>ros_gz_bridge</exec_depend>
