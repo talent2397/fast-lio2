@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-WASD keyboard control — thread reads keys from /dev/tty, main loop publishes.
-800ms hold: covers the ~660ms initial key-repeat delay for ALL keys equally.
+WASD keyboard — adaptive per-key timeout (all logic in reader thread).
+Initial press: 750ms grace. After 2nd repeat: 150ms fast release.
 """
 import os
 import select
@@ -13,14 +13,17 @@ from time import time
 import rclpy
 from geometry_msgs.msg import Twist
 
-LIN = 2.0
-ANG = 2.0
+LIN   = 2.0
+ANG   = 2.0
 TOPIC = '/robot/cmd_vel'
-HOLD = 0.80   # 800ms > 660ms key-repeat initial gap, same for every key
+INIT  = 0.75    # covers 660ms first-repeat gap
+FAST  = 0.18    # release detected quickly after repeat confirmed
 
 
-def reader_thread(fd, ts, running):
-    """Blocking read from /dev/tty. Updates timestamp array on key events."""
+def reader_thread(fd, ts, timeout, running):
+    """Reads keys and manages per-key state entirely in this thread."""
+    prev_ts = [0.0, 0.0, 0.0, 0.0]   # previous event time for gap detection
+
     while running[0]:
         r, _, _ = select.select([fd], [], [], 0.05)
         if not r:
@@ -33,20 +36,31 @@ def reader_thread(fd, ts, running):
         if not data:
             running[0] = False
             break
+
         now = time()
         for b in data:
             ch = chr(b).lower()
             if ch == 'q' or b == b'\x03':
                 running[0] = False
                 return
-            elif ch == 'w':
-                ts[0] = now
+            idx = -1
+            if ch == 'w':
+                idx = 0
             elif ch == 's':
-                ts[1] = now
+                idx = 1
             elif ch == 'a':
-                ts[2] = now
+                idx = 2
             elif ch == 'd':
-                ts[3] = now
+                idx = 3
+            if idx < 0:
+                continue
+
+            # Detect repeat flow: two events < 100ms apart on same key
+            if timeout[idx] == INIT and prev_ts[idx] > 0 and now - prev_ts[idx] < 0.10:
+                timeout[idx] = FAST
+
+            prev_ts[idx] = ts[idx] if ts[idx] > 0 else now
+            ts[idx] = now
 
 
 def main():
@@ -63,15 +77,15 @@ def main():
     node = rclpy.create_node('keyboard_drive')
     pub = node.create_publisher(Twist, TOPIC, 10)
 
-    print(f'\nW/S = +/- {LIN} m/s  |  A=右转 D=左转 {ANG} rad/s')
-    print('Hold = move.  Release = stop.  Q = quit.\n')
+    print(f'\nW/S=+-{LIN:.0f}m/s  A/D=+-{ANG:.0f}rad/s  Q=quit')
+    print('Hold=move  Release=stop (fast release ~180ms)\n')
 
-    # ts[0]=W, [1]=S, [2]=A, [3]=D    (lists are mutable across threads)
-    ts = [0.0, 0.0, 0.0, 0.0]
+    ts = [0.0, 0.0, 0.0, 0.0]            # w, s, a, d
+    timeout = [INIT, INIT, INIT, INIT]     # per-key current timeout
     running = [True]
 
-    t = threading.Thread(target=reader_thread, args=(fd, ts, running), daemon=True)
-    t.start()
+    threading.Thread(target=reader_thread,
+                     args=(fd, ts, timeout, running), daemon=True).start()
 
     last_vx = 0.0
     last_vz = 0.0
@@ -83,12 +97,22 @@ def main():
 
             now = time()
 
-            w_on = now - ts[0] < HOLD
-            s_on = now - ts[1] < HOLD
-            a_on = now - ts[2] < HOLD
-            d_on = now - ts[3] < HOLD
+            w_on = ts[0] > 0 and now - ts[0] < timeout[0]
+            s_on = ts[1] > 0 and now - ts[1] < timeout[1]
+            a_on = ts[2] > 0 and now - ts[2] < timeout[2]
+            d_on = ts[3] > 0 and now - ts[3] < timeout[3]
 
-            # Linear: last W/S wins
+            # Reset timeout to INIT when key expires
+            if not w_on and ts[0] > 0:
+                timeout[0] = INIT
+            if not s_on and ts[1] > 0:
+                timeout[1] = INIT
+            if not a_on and ts[2] > 0:
+                timeout[2] = INIT
+            if not d_on and ts[3] > 0:
+                timeout[3] = INIT
+
+            # Linear: latest W/S wins
             if w_on and (not s_on or ts[0] >= ts[1]):
                 vx = LIN
             elif s_on:
@@ -96,7 +120,7 @@ def main():
             else:
                 vx = 0.0
 
-            # Angular: last A/D wins  (A=右转 +ANG, D=左转 -ANG)
+            # Angular: A=右转 D=左转
             if a_on and (not d_on or ts[2] >= ts[3]):
                 vz = -ANG
             elif d_on:
