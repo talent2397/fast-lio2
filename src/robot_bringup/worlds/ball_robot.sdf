@@ -219,7 +219,7 @@
 
 <!-- ====== 检测目标: 红色球体 (椅子不可见面, 球在 NE区货架旁) ====== -->
 <model name="target_ball"><static>true</static>
-  <pose>12 5 0.5 0 0 0</pose>
+  <pose>5 0 0.5 0 0 0</pose>
   <link name="ball">
     <visual name="v">
       <geometry><sphere><radius>0.35</radius></sphere></geometry>

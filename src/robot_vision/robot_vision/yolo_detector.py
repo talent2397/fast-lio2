@@ -19,8 +19,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from vision_msgs.msg import Detection2DArray, Detection2D, ObjectHypothesisWithPose
-from vision_msgs.msg import BoundingBox2D
-from geometry_msgs.msg import Pose2D
+from vision_msgs.msg import BoundingBox2D, Pose2D
 
 # Try loading YOLO; fall back to HSV-only if torch not installed
 YOLO_ENABLED = False
@@ -35,9 +34,9 @@ except ImportError:
 TARGET_CLASSES_YOLO = {32: 'sports ball', 56: 'chair', 0: 'person'}
 
 # HSV ranges for RED ball (two ranges because red wraps around 0/180 in HSV)
-RED_LOWER_1 = np.array([0, 100, 80])
-RED_UPPER_1 = np.array([10, 255, 255])
-RED_LOWER_2 = np.array([160, 100, 80])
+RED_LOWER_1 = np.array([0, 30, 40])
+RED_UPPER_1 = np.array([15, 255, 255])
+RED_LOWER_2 = np.array([160, 30, 40])
 RED_UPPER_2 = np.array([180, 255, 255])
 
 
@@ -69,7 +68,7 @@ class YoloDetector(Node):
         self.frame_count = 0
         self.inference_every = self.declare_parameter('inference_every', 2).value
 
-        self.get_logger().info('Detector ready (YOLO=%s, HSV=always)', 'ON' if YOLO_ENABLED else 'OFF')
+        self.get_logger().info(f'Detector ready (YOLO={"ON" if YOLO_ENABLED else "OFF"}, HSV=always)')
 
     def _detect_red_ball(self, hsv_img):
         """HSV color segmentation for red ball. Returns list of (cx,cy,w,h) tuples."""
@@ -136,8 +135,8 @@ class YoloDetector(Node):
             det2d.results.append(obj)
             bbox = BoundingBox2D()
             bbox.center = Pose2D()
-            bbox.center.x = cx
-            bbox.center.y = cy
+            bbox.center.position.x = cx
+            bbox.center.position.y = cy
             bbox.size_x = bw
             bbox.size_y = bh
             det2d.bbox = bbox
@@ -169,8 +168,8 @@ class YoloDetector(Node):
                     det2d.results.append(obj)
                     bbox = BoundingBox2D()
                     bbox.center = Pose2D()
-                    bbox.center.x = cxb
-                    bbox.center.y = cyb
+                    bbox.center.position.x = cxb
+                    bbox.center.position.y = cyb
                     bbox.size_x = bw2
                     bbox.size_y = bh2
                     det2d.bbox = bbox
