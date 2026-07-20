@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-2D 地图启动 — pointcloud_to_laserscan + slam_toolbox
+2D 地图启动 — cloud_to_scan (无TF) + slam_toolbox
 
 地图管线:
-  FAST-LIO /cloud_registered → pointcloud_to_laserscan → /scan
+  FAST-LIO /cloud_registered → cloud_to_scan (odom姿态) → /scan
   /scan + /robot/odom → slam_toolbox (online_async) → /map
 
-slam_toolbox 是 Lifecycle 节点，必须发送 CONFIGURE→ACTIVATE 事件。
+优势: cloud_to_scan 直接用 odom 姿态做坐标变换，不走 TF message_filter，
+      彻底消除 "Message Filter dropping message" 问题。
 """
 import os
 from ament_index_python.packages import get_package_share_directory
@@ -23,34 +24,16 @@ def generate_launch_description():
     pkg_nav = get_package_share_directory('robot_navigation')
     slam_params = os.path.join(pkg_nav, 'config', 'slam_toolbox.yaml')
 
-    # 1. 3D 点云 → 2D 激光扫描
+    # 1. 3D 点云 → 2D 激光扫描 (自定义节点, 无 TF 依赖)
     pcl_node = Node(
-        package='pointcloud_to_laserscan',
-        executable='pointcloud_to_laserscan_node',
-        name='pointcloud_to_laserscan',
-        remappings=[
-            ('cloud_in', '/cloud_registered'),
-            ('scan', '/scan'),
-        ],
-        parameters=[{
-            'target_frame': 'robot/base_link',
-            'transform_tolerance': 0.5,
-            'min_height': 0.05,
-            'max_height': 2.0,
-            'angle_min': -3.14159,
-            'angle_max': 3.14159,
-            'angle_increment': 0.0043633,
-            'scan_time': 0.1,
-            'range_min': 0.3,
-            'range_max': 30.0,
-            'use_inf': True,
-            'inf_epsilon': 1.0,
-            'use_sim_time': True,
-        }],
+        package='robot_navigation',
+        executable='cloud_to_scan.py',
+        name='cloud_to_scan',
+        parameters=[{'use_sim_time': True}],
         output='screen',
     )
 
-    # 2. slam_toolbox — Lifecycle 节点 (namespace 必须指定)
+    # 2. slam_toolbox — Lifecycle 节点
     slam_node = LifecycleNode(
         package='slam_toolbox',
         executable='async_slam_toolbox_node',
@@ -60,7 +43,6 @@ def generate_launch_description():
         output='screen',
     )
 
-    # CONFIGURE 事件
     configure_event = EmitEvent(
         event=ChangeState(
             lifecycle_node_matcher=matches_action(slam_node),
@@ -68,7 +50,6 @@ def generate_launch_description():
         ),
     )
 
-    # ACTIVATE 事件（CONFIGURE 完成后自动触发）
     activate_event = RegisterEventHandler(
         OnStateTransition(
             target_lifecycle_node=slam_node,

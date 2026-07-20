@@ -10,7 +10,7 @@ from launch_ros.actions import Node
 def generate_launch_description():
     pkg_nav = get_package_share_directory('robot_navigation')
     params = os.path.join(pkg_nav, 'config', 'nav2_params.yaml')
-    script = os.path.join(pkg_nav, 'scripts', 'activate_nav2.sh')
+    script = os.path.join(pkg_nav, 'scripts', 'activate_nav2.py')
 
     nodes = [
         Node(package='nav2_planner', executable='planner_server',
@@ -23,11 +23,11 @@ def generate_launch_description():
              name='bt_navigator', parameters=[params], output='screen'),
         Node(package='nav2_velocity_smoother', executable='velocity_smoother',
              name='velocity_smoother', parameters=[params],
-             remappings=[('cmd_vel', '/robot/cmd_vel')], output='screen'),
+             remappings=[('cmd_vel_smoothed', '/robot/cmd_vel')], output='screen'),
     ]
 
     activate = TimerAction(period=6.0, actions=[
-        ExecuteProcess(cmd=['bash', script], output='screen', name='nav2_activate'),
+        ExecuteProcess(cmd=['python3', script], output='screen', name='nav2_activate'),
     ])
 
     return LaunchDescription([*nodes, activate])
