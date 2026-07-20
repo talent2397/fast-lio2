@@ -7,6 +7,16 @@ set -e
 
 WS="/home/c/fastlio_ws"
 
+# Ctrl+C 时自动关闭窗口 2 和 3
+cleanup() {
+    set +e
+    echo ""
+    echo "正在关闭 Vision Viewer 和 WASD Drive 窗口..."
+    pkill -f "multi_image_view|drive_control" 2>/dev/null
+    exit 0
+}
+trap cleanup SIGINT SIGTERM EXIT
+
 source /opt/ros/jazzy/setup.bash
 source $WS/install/setup.bash 2>/dev/null || true
 
