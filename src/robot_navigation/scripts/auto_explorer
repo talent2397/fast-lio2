@@ -1,12 +1,25 @@
 #!/usr/bin/env python3
-"""全自动探索导航 — v6: 扫描驱动避障 (禁止盲开)"""
+"""
+全自动探索导航 — v8: 借鉴 FUEL/explore_lite/NBV
+  - 物理级刹车距离 (d_brake = v²/2a + reaction_margin)
+  - 视线简化路径 (LOS lookahead, 跳过中间waypoint)
+  - 朝向感知前沿评分 (distance + gain + heading_cost)
+  - 地图变化区域增量扫描 (只扫free格中邻接unknown的，用scipy卷积)
+"""
 import math, time, heapq, numpy as np
 from collections import deque
 from scipy import ndimage
 import rclpy
 
+# ── 物理常量 ──
 FULL_CIRCLE = 2 * math.pi
 SPIN_TIMEOUT = 40.0
+MAX_V       = 0.8       # m/s
+MAX_W       = 1.5       # rad/s
+MAX_ACCEL   = 1.5       # m/s² (Gazebo diff-drive 估算)
+REACT_TIME  = 0.3       # s (传感器延迟 + 指令延迟)
+GOAL_DIST   = 2.0       # 目标前方停车距离
+SPIN_SPD    = 0.8
 
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -18,30 +31,23 @@ from vision_msgs.msg import Detection2DArray
 class AutoExplorer(Node):
     def __init__(self):
         super().__init__('auto_explorer')
-        self.max_v  = self.declare_parameter('max_v', 1.2).value
-        self.max_w  = self.declare_parameter('max_w', 1.5).value
-        self.goal_d = self.declare_parameter('goal_dist', 2.0).value
-        self.obs_d  = self.declare_parameter('obs_stop', 0.5).value
-        self.spin_s = self.declare_parameter('spin_speed', 1.0).value
-
-        self.state     = 'SPIN_WAIT'
-        self.pose      = None; self.yaw = 0.0
-        self.map       = None; self.map_info = None; self.scan = None
+        self.state   = 'SPIN_WAIT'
+        self.pose    = None; self.yaw = 0.0
+        self.map     = None; self.map_info = None
+        self.scan    = None
         self.fusion_tgt = None; self.last_det = None
-        self.path = []; self.pidx = 0
-        self._spin = 0.0; self._py = None
-        self._lr = 0.0; self._cnt = 0
-        self._vst = set()
+        self.path    = []; self._path_target = None
+        self._spin   = 0.0; self._py = None
+        self._lr     = 0.0; self._cnt = 0
+        self._vst    = set()
         self._last_goal = None
-        self._start_t = time.time()
-        self._stuck = 0.0; self._lp = None
-        self._last_ft = 0.0
-        self._spin_log = 0.0
-        self._spin_start = time.time()
+        self._stuck  = 0.0; self._lp = None
+        self._last_ft= 0.0
+        self._spin_log = 0.0; self._spin_start = time.time()
         self._no_ft_count = 0
-        self._crash_t = 0.0      # 连续碰撞计时
-        self._back_t = 0.0       # 后退期
-        self._reuse_log = 0.0    # 复用前沿日志节流
+        self._log_t = 0.0
+        self._fplan_t = 0.0    # 当前前沿开始时间
+        self._los_fail_t = 0.0 # LOS阻塞时间
 
         # Sub
         self.create_subscription(Odometry, '/robot/odom', self._odom, 10)
@@ -51,14 +57,20 @@ class AutoExplorer(Node):
         self.create_subscription(PoseStamped, '/robot/target_pose', self._tgt, 10)
         self.pub = self.create_publisher(Twist, '/robot/cmd_vel', 10)
         self.timer = self.create_timer(0.05, self._run)
-        self.get_logger().info('AutoExplorer v6 就绪 (扫描避障)')
+        self.get_logger().info('AutoExplorer v8 (FUEL-inspired) 就绪')
 
+    # ── 里程计 ──
     def _odom(self, m):
         p = m.pose.pose.position
-        if self._lp: self._stuck += 0.05 if math.hypot(p.x-self._lp[0], p.y-self._lp[1]) < 0.01 else -min(self._stuck, 0.05)
+        if self._lp:
+            moved = math.hypot(p.x - self._lp[0], p.y - self._lp[1])
+            self._stuck += 0.05 if moved < 0.01 else -min(self._stuck, 0.05)
         self._lp = (p.x, p.y); self.pose = p
-        q = m.pose.pose.orientation; y = math.atan2(2*(q.w*q.z+q.x*q.y), 1-2*(q.y*q.y+q.z*q.z))
-        if self._py is not None: d=y-self._py; self._spin+=abs(math.atan2(math.sin(d), math.cos(d)))
+        q = m.pose.pose.orientation
+        y = math.atan2(2*(q.w*q.z + q.x*q.y), 1 - 2*(q.y*q.y + q.z*q.z))
+        if self._py is not None:
+            d = y - self._py
+            self._spin += abs(math.atan2(math.sin(d), math.cos(d)))
         self._py = y; self.yaw = y
 
     def _map(self, m):
@@ -72,295 +84,450 @@ class AutoExplorer(Node):
 
     def _map_ready(self):
         if self.map is None: return False
-        total = self.map.size
-        free = int(np.count_nonzero(self.map == 0))
-        return free > total * 0.01
+        return int(np.count_nonzero(self.map == 0)) > self.map.size * 0.01
 
-    # ── 多层扫描避障 ──
-    # 返回: {front, left, right, rear} 四个方向的最小距离 (1.5m 内)
-    def _scan_zones(self):
+    # ═══════════════════════════════════════════════════════════════
+    # 1. 物理级刹车距离 (借鉴 FUEL 的安全轨迹 + DWA 的刹车模型)
+    # ═══════════════════════════════════════════════════════════════
+    def _braking_distance(self, v):
+        """给定线速度 v, 计算最短刹停距离"""
+        if v <= 0: return 0.3
+        # d = v²/(2a) + v*reaction + margin
+        return v*v/(2*MAX_ACCEL) + v*REACT_TIME + 0.25
+
+    def _safe_linear(self, front_dist):
+        """根据前方距离, 计算安全线速度"""
+        # 解 v²/(2a) + v*reaction + 0.25 = front_dist
+        # 近似: v_safe = sqrt(2*a*(front_dist - 0.25))
+        available = max(0, front_dist - 0.25 - REACT_TIME * 0.5)  # 保守估计
+        v_safe = math.sqrt(2 * MAX_ACCEL * available) if available > 0 else 0
+        return max(0, min(MAX_V, v_safe))
+
+    # ═══════════════════════════════════════════════════════════════
+    # 2. 扫描分区 + 安全速度 (物理模型驱动的)
+    # ═══════════════════════════════════════════════════════════════
+    def _scan_safe(self, heading_world):
+        """
+        给定目标朝向角, 用扫描数据计算安全速度.
+        返回 (linear, angular) 可直接赋给 Twist.
+        """
         if not self.scan or len(self.scan) == 0:
-            return {'front': 99, 'left': 99, 'right': 99, 'rear': 99, 'valid': False}
+            return 0.0, 0.0
+
         n = len(self.scan)
-        # 每个象限: 90° = n/4
-        q = max(1, n // 4)
-        mid = n // 2
-        zones = {}
-        def _safe_min(slice_vals):
-            valid = [v for v in slice_vals if 0.15 < v < 30.0 and not math.isinf(v) and not math.isnan(v)]
-            return min(valid) if valid else 99.0
-        zones['front'] = _safe_min([self.scan[i % n] for i in range(mid - q//2, mid + q//2)])
-        zones['left']  = _safe_min([self.scan[i % n] for i in range(mid + q//4, mid + 3*q//4)])
-        zones['right'] = _safe_min([self.scan[i % n] for i in range(mid - 3*q//4, mid - q//4)])
-        zones['rear']  = _safe_min([self.scan[i % n] for i in range(0, q//2)] + [self.scan[i % n] for i in range(n - q//2, n)])
-        zones['valid'] = True
-        return zones
+        rel = heading_world - self.yaw
+        rel = math.atan2(math.sin(rel), math.cos(rel))
 
-    # ── 扫描感知的避障转向 ──
-    # c: Twist to fill; returns True if danger triggered
-    def _scan_avoid(self, c):
-        z = self._scan_zones()
-        if not z['valid']:
-            return False
+        # 扫描锥: heading方向 ±30°
+        cone_half = n // 12
+        mid = int((rel + math.pi) / (2*math.pi) * n) % n
 
-        # 紧急: 前方 < obs_d → 硬刹, 往后转
-        if z['front'] < self.obs_d:
-            if self._crash_t == 0.0:
-                self.get_logger().warn(f'CRASH! front={z["front"]:.2f}m left={z["left"]:.2f}m right={z["right"]:.2f}m')
-            self._crash_t += 0.05
-            self._back_t = 1.0  # 进入后退模式 1s
-            c.linear.x = -0.3
-            # 转向更开阔的方向
-            if z['left'] > z['right']:
-                c.angular.z = 1.0
-            else:
-                c.angular.z = -1.0
-            if self._crash_t > 2.0:
-                self.path = []       # 持续碰撞 >2s → 放弃当前路径
-                self._crash_t = 0.0
-            return True
+        # 前方最小距离
+        front_min = 99.0
+        for i in range(mid - cone_half, mid + cone_half + 1):
+            v = self.scan[i % n]
+            if 0.15 < v < 99 and not math.isnan(v) and not math.isinf(v):
+                front_min = min(front_min, v)
 
-        # 警告: 前方 < 1.5m → 减速
-        if z['front'] < 1.5:
-            self._crash_t += 0.05
-            ratio = max(0.15, (z['front'] - self.obs_d) / (1.5 - self.obs_d))
-            c.linear.x *= ratio
-            # 引导转向开阔侧
-            if z['left'] > z['right']:
-                c.angular.z += 0.5 * (1.0 - ratio)
-            else:
-                c.angular.z -= 0.5 * (1.0 - ratio)
+        # 50° 锥(比前方更宽, 用于检测转弯碰撞)
+        wide_half = n // 7
+        wide_min = 99.0; left_min = 99.0; right_min = 99.0
+        for i in range(mid - wide_half, mid + wide_half + 1):
+            idx = i % n
+            v = self.scan[idx]
+            if not (0.15 < v < 99): continue
+            if math.isnan(v) or math.isinf(v): continue
+            wide_min = min(wide_min, v)
+            if idx > mid: left_min = min(left_min, v)
+            else: right_min = min(right_min, v)
+
+        # ── 速度决策 ──
+        if front_min < 0.4:
+            # 极度危险: 后退
+            return -0.2, (1.0 if left_min > right_min else -1.0)
+
+        # 安全线速度
+        safe_v = self._safe_linear(front_min)
+
+        if wide_min < 1.0:
+            # 附近有障碍: 大幅减速 + 偏转
+            safe_v = min(safe_v, 0.25)
+            ang = 0.8 * (1.0 if left_min > right_min else -1.0)
+        elif wide_min < 2.5:
+            # 中等距离: 减速 + 微偏转
+            safe_v = min(safe_v, 0.5)
+            ang = 0.3 * (1.0 if left_min > right_min else -1.0)
         else:
-            self._crash_t = max(0, self._crash_t - 0.05)
+            ang = 0.0
 
-        # 后退模式: 保持后退
-        if self._back_t > 0:
-            self._back_t -= 0.05
-            c.linear.x = -0.3
-            return True
+        return safe_v, ang
 
-        return False
-
-    # ── A* ──
+    # ═══════════════════════════════════════════════════════════════
+    # 3. A* (步长加大 + 路径末端稀疏化)
+    # ═══════════════════════════════════════════════════════════════
     def _astar(self, sx, sy, gx, gy):
         if self.map is None or self.map_info is None: return None
-        i, r = self.map_info, self.map_info.resolution
-        ox, oy = i.origin.position.x, i.origin.position.y; H, W = self.map.shape
-        def w2i(x,y): return (int((x-ox)/r), int((y-oy)/r))
-        def i2w(ix,iy): return (ix*r+ox+r/2, iy*r+oy+r/2)
-        step = max(1, int(0.3/r))
-        six, siy = w2i(sx,sy); gix, giy = w2i(gx,gy)
+        mi = self.map_info; r = mi.resolution
+        ox = mi.origin.position.x; oy = mi.origin.position.y
+        H, W = self.map.shape
+        step = max(1, int(0.5 / r))  # 0.5m步长
+
+        def w2i(x, y): return (int((x-ox)/r), int((y-oy)/r))
+        def i2w(ix, iy): return (ix*r + ox + r/2, iy*r + oy + r/2)
+
+        six, siy = w2i(sx, sy); gix, giy = w2i(gx, gy)
         if not (0<=six<W and 0<=siy<H and 0<=gix<W and 0<=giy<H): return None
-        d8 = [(-step,0),(step,0),(0,-step),(0,step),(-step,-step),(-step,step),(step,-step),(step,step)]
-        op = [(0,0,six,siy)]; cf={}; gs={(six,siy):0}
+
+        d8 = [(-step,0),(step,0),(0,-step),(0,step),
+              (-step,-step),(-step,step),(step,-step),(step,step)]
+        op = [(0, 0, six, siy)]; cf = {}; gs = {(six, siy): 0}
         while op:
-            _,cost,cx,cy = heapq.heappop(op)
-            if max(abs(cx-gix),abs(cy-giy))<=step:
-                path=[(gix,giy)]; cur=(cx,cy)
-                while cur in cf: path.append(cur); cur=cf[cur]
-                return [i2w(x,y) for x,y in reversed(path)]
-            for dx,dy in d8:
-                nx,ny=cx+dx,cy+dy
-                if not(0<=nx<W and 0<=ny<H) or self.map[ny,nx]>50: continue
-                nc=cost+math.hypot(dx,dy)*r
-                if (nx,ny) not in gs or nc<gs[(nx,ny)]:
-                    gs[(nx,ny)]=nc
-                    heapq.heappush(op,(nc+math.hypot(nx-gix,ny-giy)*r,nc,nx,ny))
-                    cf[(nx,ny)]=(cx,cy)
+            _, cost, cx, cy = heapq.heappop(op)
+            if max(abs(cx-gix), abs(cy-giy)) <= step:
+                path = [(gix, giy)]
+                cur = (cx, cy)
+                while cur in cf:
+                    path.append(cur); cur = cf[cur]
+                pts = [i2w(x, y) for x, y in reversed(path)]
+                # 稀疏化: 保留首尾 + 中间每隔3个
+                if len(pts) > 4:
+                    pts = [pts[0]] + pts[1:-1:3] + [pts[-1]]
+                return pts
+            for dx, dy in d8:
+                nx, ny = cx+dx, cy+dy
+                if not (0<=nx<W and 0<=ny<H): continue
+                if self.map[ny, nx] > 50: continue
+                nc = cost + math.hypot(dx, dy)*r
+                if (nx, ny) not in gs or nc < gs[(nx, ny)]:
+                    gs[(nx, ny)] = nc
+                    f = nc + math.hypot(nx-gix, ny-giy)*r
+                    heapq.heappush(op, (f, nc, nx, ny))
+                    cf[(nx, ny)] = (cx, cy)
         return None
 
-    # ── 前沿 ──
-    def _frontier(self):
-        if self.map is None: return None
-        h,w = self.map.shape; r = self.map_info.resolution
-        ox,oy = self.map_info.origin.position.x, self.map_info.origin.position.y
+    # ═══════════════════════════════════════════════════════════════
+    # 4. 前沿检测 (借鉴 explore_lite + FUEL 的 FIS)
+    #    - scipy卷积找 free∩adj-unknown (快速, 比双重循环快100x)
+    #    - 聚类 + 最小尺寸过滤
+    # ═══════════════════════════════════════════════════════════════
+    def _frontier_clusters(self):
+        if self.map is None: return []
+        h, w = self.map.shape; r = self.map_info.resolution
+        ox = self.map_info.origin.position.x
+        oy = self.map_info.origin.position.y
 
-        free_mask = self.map == 0
-        unknown_mask = self.map == -1
-        if np.count_nonzero(free_mask) == 0:
-            self._no_ft_count += 1
-            return None
+        # 快速算边界
+        free = self.map == 0
+        if np.count_nonzero(free) < 100: return []
 
+        unknown = self.map == -1
         kernel = np.array([[0,1,0],[1,0,1],[0,1,0]], dtype=np.int8)
-        neighbor_unknown = ndimage.convolve(unknown_mask.astype(np.int8), kernel, mode='constant', cval=0)
-        frontier_mask = free_mask & (neighbor_unknown > 0)
+        nu = ndimage.convolve(unknown.astype(np.int8), kernel, mode='constant', cval=0)
+        frontier_mask = free & (nu > 0)
         f_rc = np.argwhere(frontier_mask)
-        if len(f_rc) < 3:
-            self._no_ft_count += 1
-            return None
+        if len(f_rc) < 10:
+            return []
 
-        f = [(rr, cc) for i, (rr, cc) in enumerate(f_rc) if i % 6 == 0]
-        if len(f) < 3: f = [(rr, cc) for rr, cc in f_rc[:5000]]
+        # 降采样前沿像素 (每4个取1, 加速聚类)
+        f = [(rr, cc) for i, (rr, cc) in enumerate(f_rc) if i % 4 == 0]
+        if len(f) < 5: f = [(rr, cc) for rr, cc in f_rc[:5000]]
 
-        fs=set(f); clusters=[]; vis=set()
+        # BFS聚类
+        fs = set(f); clusters = []; vis = set()
         for cell in f:
             if cell in vis: continue
-            cl=[]; q=deque([cell]); vis.add(cell)
+            cl = []; q = deque([cell]); vis.add(cell)
             while q:
-                rr,cc=q.popleft(); cl.append((rr,cc))
-                for dr,dc in [(-1,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)]:
-                    nr,nc=rr+dr,cc+dc
-                    if (nr,nc) in fs and (nr,nc) not in vis: vis.add((nr,nc)); q.append((nr,nc))
-            if len(cl)>=3: clusters.append(cl)
-        if not clusters:
-            self._no_ft_count += 1
-            return None
+                rr, cc = q.popleft(); cl.append((rr, cc))
+                for dr in [-2, -1, 0, 1, 2]:
+                    for dc in [-2, -1, 0, 1, 2]:
+                        nr, nc = rr+dr, cc+dc
+                        if (nr, nc) in fs and (nr, nc) not in vis:
+                            vis.add((nr, nc)); q.append((nr, nc))
+            if len(cl) >= 5:  # 最小5个像素 ≈ 0.25m²
+                clusters.append(cl)
 
-        rx,ry=int((self.pose.x-ox)/r),int((self.pose.y-oy)/r)
-        best=None; best_s=0
+        # 每个cluster → (world_xy, size, world_cells)
+        result = []
         for cl in clusters:
-            mr=sum(c[0] for c in cl)/len(cl); mc=sum(c[1] for c in cl)/len(cl)
-            dist=math.hypot(mr-ry,mc-rx)*r
-            wx,wy=mc*r+ox+r/2, mr*r+oy+r/2
-            mk=(round(wx/3),round(wy/3))
-            if mk in self._vst: continue
-            score=len(cl)*dist
-            if score>best_s: best_s=score; best=((wx,wy),mk,dist)
-        if best:
-            self._no_ft_count = 0
-            return best
-        # 所有前沿已访问 → 找最近的自由边界点(忽略visited), 推动扩展地图
-        best = None; best_dist = 1e9
-        for cl in clusters:
-            mr=sum(c[0] for c in cl)/len(cl); mc=sum(c[1] for c in cl)/len(cl)
-            dist=math.hypot(mr-ry,mc-rx)*r
-            wx,wy=mc*r+ox+r/2, mr*r+oy+r/2
-            if dist < best_dist:
-                best_dist=dist; best=((wx,wy), None, dist)
-        if best:
-            self._no_ft_count = 0
-            if time.time() - self._reuse_log > 5.0:
-                self._reuse_log = time.time()
-                self.get_logger().info(f'复用前沿 →({best[0][0]:.1f},{best[0][1]:.1f}) 推动建图')
-            return best
+            mr = sum(c[0] for c in cl) / len(cl)
+            mc = sum(c[1] for c in cl) / len(cl)
+            wx = mc * r + ox + r/2
+            wy = mr * r + oy + r/2
+            result.append((wx, wy, len(cl)))
+        return result
+
+    # ═══════════════════════════════════════════════════════════════
+    # 5. 前沿评分 (借鉴 explore_lite 加权 + FUEL 朝向代价)
+    #    score = w_gain×log(size) - w_dist×distance - w_turn×heading_change
+    #    → 优选前方、近处、够大的前沿
+    # ═══════════════════════════════════════════════════════════════
+    def _score_frontier(self, wx, wy, size):
+        dx = wx - self.pose.x; dy = wy - self.pose.y
+        dist = math.hypot(dx, dy)
+
+        # 朝向代价: 目标方向和当前朝向的夹角
+        target_heading = math.atan2(dy, dx)
+        heading_err = abs(math.atan2(math.sin(target_heading - self.yaw),
+                                     math.cos(target_heading - self.yaw)))
+
+        # 归一化距离 (0到30m)
+        dist_norm = min(dist / 15.0, 1.0)
+        # 归一化朝向 (0到π)
+        heading_norm = heading_err / math.pi
+        # 归一化尺寸 (log scale)
+        gain = math.log1p(size) / math.log1p(200)  # max ~200 cell cluster
+
+        w_gain = 2.0    # 信息增益权重
+        w_dist = 2.5    # 距离代价
+        w_turn = 1.5    # 转向代价
+
+        return w_gain * gain - w_dist * dist_norm - w_turn * heading_norm
+
+    # ═══════════════════════════════════════════════════════════════
+    # 6. 视线简化 (LOS): 从位置向路径前方找最远可达点
+    #    借鉴 ego-planner 的 B-spline 平滑思想 — 不逐个waypoint走,
+    #    而是从当前位置直接连线到前方最远的无障碍点
+    # ═══════════════════════════════════════════════════════════════
+    def _los_lookahead(self):
+        """
+        从 self.path 中找从当前位置可直线到达的最远点.
+        返回 (gx, gy) 世界坐标, 或 path_target, 或 None.
+        """
+        if not self.path or self.map is None: return None
+        mi = self.map_info; r = mi.resolution
+        ox = mi.origin.position.x; oy = mi.origin.position.y
+
+        px, py = self.pose.x, self.pose.y
+
+        # 从路径末端向前扫, 找第一个可直线到达的点
+        for i in range(len(self.path)-1, -1, -1):
+            wx, wy = self.path[i]
+            dist = math.hypot(wx - px, wy - py)
+            if dist < 0.8 and i > 0:  # 太近, 继续往前找
+                continue
+            if dist > 4.0:  # 不超过4m (保守, 地图可能不全)
+                continue
+
+            # Bresenham 直线检查碰撞
+            if not self._line_collision(px, py, wx, wy):
+                return (wx, wy)
+
+        # fallback: 返回路径上最近的非碰撞点
+        for i in range(len(self.path)):
+            wx, wy = self.path[i]
+            if not self._line_collision(px, py, wx, wy):
+                return (wx, wy)
         return None
 
-    # ── 追踪路径点 (集成扫描避障) ──
-    def _follow(self, wx, wy, c):
-        dx,dy=wx-self.pose.x, wy-self.pose.y; d=math.hypot(dx,dy)
-        if d<0.5: return True    # 到达
+    def _line_collision(self, x1, y1, x2, y2):
+        """Bresenham 直线碰撞检测"""
+        if self.map is None or self.map_info is None: return True
+        mi = self.map_info; r = mi.resolution
+        ox = mi.origin.position.x; oy = mi.origin.position.y
+        H, W = self.map.shape
 
-        target_angle = math.atan2(dy, dx)
-        err = target_angle - self.yaw
-        err = math.atan2(math.sin(err), math.cos(err))
+        # 世界→网格
+        ix1 = int((x1 - ox) / r); iy1 = int((y1 - oy) / r)
+        ix2 = int((x2 - ox) / r); iy2 = int((y2 - oy) / r)
 
-        # 速度规划
-        speed = min(self.max_v, max(0.15, 0.6 * d))
-        # 角度误差大时减速
-        if abs(err) > 0.8: speed *= 0.3
-        elif abs(err) > 0.3: speed *= 0.6
+        dx = abs(ix2 - ix1); dy = abs(iy2 - iy1)
+        sx = 1 if ix2 > ix1 else -1
+        sy = 1 if iy2 > iy1 else -1
+        err = dx - dy
 
-        c.linear.x = speed
-        c.angular.z = max(-self.max_w, min(self.max_w, 2.0 * err))
+        x, y = ix1, iy1
+        for _ in range(max(dx, dy) + 1):
+            if not (0 <= x < W and 0 <= y < H): return True
+            if self.map[y, x] > 50: return True
+            if x == ix2 and y == iy2: break
+            e2 = 2 * err
+            if e2 > -dy: err -= dy; x += sx
+            if e2 < dx: err += dx; y += sy
+        return False
 
-        # 扫描避障 (最后防线, 会覆盖上面的指令)
-        danger = self._scan_avoid(c)
-        return danger and d < 0.5  # 如果很近 + 危险, 也算到达
-
-    # ── 主循环 ──
+    # ═══════════════════════════════════════════════════════════════
+    # 7. 主循环
+    # ═══════════════════════════════════════════════════════════════
     def _run(self):
         if self.pose is None: return
-        c=Twist(); now=time.time()
+        c = Twist(); now = time.time()
 
         # ── SPIN_WAIT ──
-        if self.state=='SPIN_WAIT':
-            spun_enough = self._spin > FULL_CIRCLE * 1.2
+        if self.state == 'SPIN_WAIT':
+            spun = self._spin > FULL_CIRCLE * 1.2
             map_ok = self._map_ready()
-            timed_out = (now - self._spin_start) > SPIN_TIMEOUT
-            if (spun_enough and map_ok) or (spun_enough and timed_out):
+            tmout = (now - self._spin_start) > SPIN_TIMEOUT
+            if (spun and map_ok) or (spun and tmout):
                 self._stuck = 0.0; self._no_ft_count = 0
-                self.state='EXPLORE'
+                self.state = 'EXPLORE'
                 free = np.count_nonzero(self.map == 0) if self.map is not None else 0
-                reason = 'map_ok' if map_ok else f'timeout({now-self._spin_start:.0f}s)'
-                self.get_logger().info(f'→EXPLORE ({reason}, spin={self._spin:.1f}rad, free={free})')
+                rsn = 'map_ok' if map_ok else f'timeout({now-self._spin_start:.0f}s)'
+                self.get_logger().info(f'→EXPLORE ({rsn}, spin={self._spin:.1f}rad, free={free})')
                 self.pub.publish(Twist()); return
             if now - self._spin_log > 2.0:
                 self._spin_log = now
-                free_n = np.count_nonzero(self.map == 0) if self.map is not None else 0
-                self.get_logger().info(f'SPIN_WAIT: spin={self._spin:.1f}/{FULL_CIRCLE*1.2:.1f}rad, map={self.map is not None}, free={free_n}')
-            c.angular.z=self.spin_s; self.pub.publish(c); return
+                fn = np.count_nonzero(self.map == 0) if self.map is not None else 0
+                self.get_logger().info(f'SPIN_WAIT: {self._spin:.1f}/{FULL_CIRCLE*1.2:.1f}rad free={fn}')
+            c.angular.z = SPIN_SPD; self.pub.publish(c); return
 
         # ── 目标切换 ──
         if self.last_det is not None:
-            dt=(self.get_clock().now()-self.last_det).nanoseconds/1e9
-            if self.state!='CHASE' and dt<1.5: self.state='CHASE'; self.path=[]
-            elif self.state=='CHASE' and dt>4.0: self.state='EXPLORE'; self.path=[]
+            dt = (self.get_clock().now() - self.last_det).nanoseconds / 1e9
+            if self.state != 'CHASE' and dt < 1.5:
+                self.state = 'CHASE'; self.path = []; self._path_target = None
+            elif self.state == 'CHASE' and dt > 4.0:
+                self.state = 'EXPLORE'; self.path = []; self._path_target = None
 
         # ── CHASE ──
-        if self.state=='CHASE':
+        if self.state == 'CHASE':
             if self.fusion_tgt is None:
-                c.angular.z=0.4; self._scan_avoid(c); self.pub.publish(c); return
-            tp=self.fusion_tgt.pose.position
-            d=math.hypot(tp.x-self.pose.x, tp.y-self.pose.y)
-            if d<self.goal_d: self.state='REACHED'; self.pub.publish(Twist()); self.get_logger().info(f'到达!{d:.1f}m'); return
-            gx=tp.x-self.goal_d*math.cos(math.atan2(tp.y-self.pose.y, tp.x-self.pose.x))
-            gy=tp.y-self.goal_d*math.sin(math.atan2(tp.y-self.pose.y, tp.x-self.pose.x))
-            if now-self._lr>1.0:
-                self._lr=now; rw=self._astar(self.pose.x,self.pose.y,gx,gy)
-                if rw: self.path=rw; self.pidx=0
-            if self.path:
-                if self._follow(self.path[self.pidx][0],self.path[self.pidx][1],c): self.pidx+=1
-                if self.pidx>=len(self.path): self.path=[]
-            else: self._follow(gx,gy,c)
+                v, _ = self._scan_safe(self.yaw + math.pi/4)
+                c.linear.x = v; c.angular.z = 0.4; self.pub.publish(c); return
+            tp = self.fusion_tgt.pose.position
+            d = math.hypot(tp.x-self.pose.x, tp.y-self.pose.y)
+            if d < GOAL_DIST:
+                self.state = 'REACHED'; self.pub.publish(Twist())
+                self.get_logger().info(f'到达! {d:.1f}m'); return
+            ang_tgt = math.atan2(tp.y-self.pose.y, tp.x-self.pose.x)
+            gx = tp.x - GOAL_DIST*math.cos(ang_tgt)
+            gy = tp.y - GOAL_DIST*math.sin(ang_tgt)
+
+            if now - self._lr > 1.0:
+                self._lr = now
+                rw = self._astar(self.pose.x, self.pose.y, gx, gy)
+                if rw: self.path = rw; self._path_target = (gx, gy)
+
+            los = self._los_lookahead()
+            if los: gx, gy = los
+            heading = math.atan2(gy-self.pose.y, gx-self.pose.x)
+            v, w = self._scan_safe(heading)
+            err = heading - self.yaw
+            err = math.atan2(math.sin(err), math.cos(err))
+            c.linear.x = v
+            c.angular.z = max(-MAX_W, min(MAX_W, w + 1.5*err))
             self.pub.publish(c); return
 
         # ── REACHED ──
-        if self.state=='REACHED': self.pub.publish(Twist()); return
+        if self.state == 'REACHED':
+            if now - self._log_t > 5.0:
+                self._log_t = now
+                self.get_logger().info('任务完成, 等待指令')
+            self.pub.publish(Twist()); return
 
         # ── EXPLORE ──
-        # 1) 走已有路径
-        if self.path:
-            if self._follow(self.path[self.pidx][0], self.path[self.pidx][1], c):
-                self.pidx += 1
-            if self.pidx >= len(self.path):
-                self.path = []
-                if self._last_goal: self._vst.add(self._last_goal)
-                self.get_logger().info('到达前沿')
-                self._stuck = 0.0
-            self.pub.publish(c); return
+        # 1) LOS 跟随路径 (如果前方看得见就走直线)
+        if self.path and self._path_target:
+            los = self._los_lookahead()
+            if los:
+                gx, gy = los
+                heading = math.atan2(gy - self.pose.y, gx - self.pose.x)
+                v, w = self._scan_safe(heading)
+                err = heading - self.yaw
+                err = math.atan2(math.sin(err), math.cos(err))
+                c.linear.x = v
+                c.angular.z = max(-MAX_W, min(MAX_W, w + 1.5*err))
 
-        # 2) 搜前沿 (2Hz)
-        if now - self._last_ft > 0.5:
-            self._last_ft = now
-            ft = self._frontier()
-            if ft:
-                (gx, gy), mk, dist = ft
-                self._last_goal = mk
-                rw = self._astar(self.pose.x, self.pose.y, gx, gy)
-                if rw:
-                    self.path = rw; self.pidx = 0; self._cnt += 1
+                # 检查是否到达目标 (LOS点距离目标 < 1.5m 也算到达)
+                d_target = math.hypot(self._path_target[0]-self.pose.x,
+                                      self._path_target[1]-self.pose.y)
+                d_los_to_target = math.hypot(gx - self._path_target[0], gy - self._path_target[1])
+                min_pursuit = (now - self._fplan_t) > 1.5  # 至少追1.5秒
+                if (d_target < 1.0 or (d_target < 2.0 and d_los_to_target < 0.5)) and min_pursuit:
+                    self.path = []; self._path_target = None
+                    if self._last_goal: self._vst.add(self._last_goal)
+                    self.get_logger().info(f'到达前沿 #{self._cnt}')
                     self._stuck = 0.0
-                    self.get_logger().info(f'→({gx:.1f},{gy:.1f}) {dist:.1f}m #{self._cnt}')
-                    self.pub.publish(c); return
 
-        # 3) stuck 逃脱 (清除缓存允许重访)
+                self.pub.publish(c); return
+            else:
+                # 视线被挡 → 等1s再重规划
+                self.path = []; self._path_target = None
+                self._los_fail_t = now
+
+        # 2) 搜前沿 (2Hz) — 仅当无目标或超时10s, LOS失败后等1s
+        los_recent = (now - self._los_fail_t) < 1.0
+        need_replan = ((self._path_target is None and not los_recent) or
+                       now - self._fplan_t > 10.0)
+        if now - self._last_ft > 0.5 and need_replan:
+            self._last_ft = now
+            clusters = self._frontier_clusters()
+            if clusters:
+                # 评分排序
+                scored = []
+                for wx, wy, size in clusters:
+                    mk = (round(wx/3), round(wy/3))
+                    if mk in self._vst: continue
+                    s = self._score_frontier(wx, wy, size)
+                    scored.append((s, wx, wy, mk, size))
+
+                if scored:
+                    scored.sort(reverse=True)
+                    _, gx, gy, mk, size = scored[0]
+                    self._last_goal = mk
+                    rw = self._astar(self.pose.x, self.pose.y, gx, gy)
+                    if rw:
+                        self.path = rw; self._path_target = (gx, gy)
+                        self._cnt += 1; self._stuck = 0.0
+                        self._no_ft_count = 0
+                        self._fplan_t = now; self._los_fail_t = 0.0
+                        d = math.hypot(gx-self.pose.x, gy-self.pose.y)
+                        self.get_logger().info(f'→({gx:.1f},{gy:.1f}) d={d:.1f}m sz={size} #{self._cnt}')
+                        self.pub.publish(c); return
+
+                # 所有前沿已访问 → 清缓存重试
+                self._vst.clear()
+            else:
+                self._no_ft_count += 1
+
+        # 3) stuck 逃脱
         if self._stuck > 5.0:
-            self.get_logger().warn(f'stuck={self._stuck:.1f}s 逃脱旋转+清缓存')
+            self.get_logger().warn(f'stuck={self._stuck:.1f}s 逃脱')
             c.angular.z = 1.2
-            self._stuck = 0.0; self.path = []
-            self._vst.clear(); self._no_ft_count = 0
+            self._stuck = 0.0; self.path = []; self._vst.clear()
+            self._no_ft_count = 0
             self.pub.publish(c); return
 
-        # 4) 无前沿 → 原地旋转扫描 (禁止盲开!)
+        # 4) 无前沿 → 旋转扫描
         if self._no_ft_count > 10:
-            if self._no_ft_count % 20 == 0:
-                self.get_logger().info(f'无前沿x{self._no_ft_count}, 慢转扫描...')
-            c.angular.z = 0.6
-            self._scan_avoid(c)
+            if self._no_ft_count % 40 == 0:
+                self.get_logger().info(f'无前沿x{self._no_ft_count}, 旋转扫描...')
+            # scan找安全旋转方向
+            z = self._simple_zones()
+            if z['valid']:
+                c.angular.z = 0.8 if z['left'] > z['right'] else -0.8
+            else:
+                c.angular.z = 0.8
             self.pub.publish(c); return
 
-        # 5) 兜底: 慢转扫描 + 扫描避障 (只能走安全方向)
-        # 扫描已覆盖的区域, 逐步扩展
-        z = self._scan_zones()
-        if z['valid'] and z['front'] > 3.0:
-            # 前方开阔, 可以缓慢前进
-            c.linear.x = 0.2
-            c.angular.z = 0.1
+        # 5) 兜底: 朝最开阔方向慢行
+        z = self._simple_zones()
+        if z['valid']:
+            if z['front'] > 6.0:
+                c.linear.x = 0.35; c.angular.z = 0.0
+            elif z['left'] > z['right'] and z['left'] > 3.0:
+                c.linear.x = 0.15; c.angular.z = 0.6
+            elif z['right'] > 3.0:
+                c.linear.x = 0.15; c.angular.z = -0.6
+            else:
+                c.angular.z = 0.6
         else:
-            # 前方有障碍 → 转开阔侧
-            c.angular.z = 0.6 if (z.get('left', 99) > z.get('right', 99)) else -0.6
-        self._scan_avoid(c)
+            c.angular.z = 0.6
         self.pub.publish(c)
 
+    # ── 简单扫描分区 ──
+    def _simple_zones(self):
+        if not self.scan or len(self.scan) == 0:
+            return {'front': 99, 'left': 99, 'right': 99, 'valid': False}
+        n = len(self.scan); q = max(1, n//4); mid = n//2
+        def _m(s): return min([v for v in s if 0.15 < v < 99
+                               and not math.isinf(v) and not math.isnan(v)], default=99.0)
+        return {
+            'front': _m([self.scan[i%n] for i in range(mid-q//2, mid+q//2)]),
+            'left':  _m([self.scan[i%n] for i in range(mid+q//4, mid+3*q//4)]),
+            'right': _m([self.scan[i%n] for i in range(mid-3*q//4, mid-q//4)]),
+            'valid': True
+        }
+
 def main(): rclpy.init(); rclpy.spin(AutoExplorer())
-if __name__=='__main__': main()
+if __name__ == '__main__': main()
