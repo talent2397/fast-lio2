@@ -50,6 +50,47 @@ def generate_launch_description():
         arguments=['0', '0', '0', '0', '0', '0', 'camera_init', 'robot/odom'],
     )
 
+    # 3.1 静态 TF: robot/base_link → robot/lidar_link (SDF: 0, 0, 0.40)
+    static_tf_lidar = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='static_tf_base_to_lidar',
+        arguments=['0', '0', '0.40', '0', '0', '0', 'robot/base_link', 'robot/lidar_link'],
+    )
+
+    # 3.2 静态 TF: robot/base_link → robot/camera_link (SDF: 0.42, 0, 0.30)
+    static_tf_camera = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='static_tf_base_to_camera',
+        arguments=['0.42', '0', '0.30', '0', '0', '0', 'robot/base_link', 'robot/camera_link'],
+    )
+
+    # 3.3 静态 TF: link → sensor (identity)
+    static_tf_lidar_sensor = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='static_tf_lidar_to_sensor',
+        arguments=['0', '0', '0', '0', '0', '0', 'robot/lidar_link', 'robot/lidar_link/lidar_sensor'],
+    )
+    static_tf_camera_sensor = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='static_tf_camera_to_sensor',
+        arguments=['0', '0', '0', '0', '0', '0', 'robot/camera_link', 'robot/camera_link/camera_sensor'],
+    )
+
+    # 3.4 静态 TF: camera sensor (ROS frame) → camera optical (OpenCV frame)
+    # ROS: x-forward, y-left, z-up  →  OpenCV: x-right, y-down, z-forward
+    # Rotation: yaw=PI/2 pitch=-PI/2  →  quaternion (qx=-0.5, qy=0.5, qz=-0.5, qw=0.5)
+    static_tf_camera_optical = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='static_tf_camera_to_optical',
+        arguments=['0', '0', '0', '-0.5', '0.5', '-0.5', '0.5',
+                   'robot/camera_link/camera_sensor', 'robot/camera_optical'],
+    )
+
     # 4. FAST-LIO2 建图
     fast_lio = Node(
         package='fast_lio',
@@ -67,11 +108,51 @@ def generate_launch_description():
         arguments=['-d', rviz_config],
     )
 
+    # 6. Vision pipeline: camera_info → YOLO detector → LiDAR-Camera fusion
+    camera_info = Node(
+        package='robot_vision',
+        executable='camera_info_publisher',
+        name='camera_info_publisher',
+        parameters=[
+            {'camera_frame': 'robot/camera_optical'},
+            {'use_sim_time': True},
+        ],
+        output='screen',
+    )
+
+    yolo_detector = Node(
+        package='robot_vision',
+        executable='yolo_detector',
+        name='yolo_detector',
+        parameters=[
+            {'inference_every': 2},
+            {'use_sim_time': True},
+        ],
+        output='screen',
+    )
+
+    lidar_fusion = Node(
+        package='robot_vision',
+        executable='lidar_camera_fusion',
+        name='lidar_camera_fusion',
+        parameters=[
+            {'min_points_in_bbox': 5},
+            {'sync_slop': 0.2},
+            {'output_frame': 'robot/odom'},
+            {'enable_debug_img': True},
+            {'use_sim_time': True},
+        ],
+        output='screen',
+    )
+
     return LaunchDescription([
         DeclareLaunchArgument('headless', default_value='false'),
         gz_sim,
         TimerAction(period=3.0, actions=[bridge]),
-        TimerAction(period=3.5, actions=[static_tf]),
+        TimerAction(period=3.5, actions=[static_tf, static_tf_lidar, static_tf_camera, static_tf_lidar_sensor, static_tf_camera_sensor, static_tf_camera_optical]),
+        TimerAction(period=5.0, actions=[camera_info]),
+        TimerAction(period=5.5, actions=[yolo_detector]),
+        TimerAction(period=6.0, actions=[lidar_fusion]),
         TimerAction(period=6.0, actions=[fast_lio]),
         TimerAction(period=10.0, actions=[rviz]),
     ])
