@@ -250,8 +250,8 @@
 
   <link name="base_link">
     <inertial>
-      <mass>8.0</mass>
-      <inertia><ixx>1.5</ixx><iyy>1.5</iyy><izz>2.0</izz></inertia>
+      <mass>4.0</mass>
+      <inertia><ixx>0.8</ixx><iyy>0.8</iyy><izz>1.0</izz></inertia>
     </inertial>
     <!-- 车身 (轮轴上方) -->
     <collision name="body_collision">
@@ -342,7 +342,7 @@
   <!-- ====== 后左驱动轮 ====== -->
   <link name="rear_left_wheel">
     <pose>-0.25 -0.30 0.00 0 0 0</pose>
-    <inertial><mass>0.8</mass>
+    <inertial><mass>0.2</mass>
       <inertia><ixx>0.008</ixx><iyy>0.008</iyy><izz>0.016</izz></inertia></inertial>
     <collision name="c">
       <pose>0 0 0 -1.5707 0 0</pose>
@@ -359,13 +359,13 @@
     <parent>base_link</parent>
     <child>rear_left_wheel</child>
     <axis><xyz>0 1 0</xyz></axis>
-    <dynamics><damping>3.0</damping><friction>2.0</friction></dynamics>
+    <dynamics><damping>10.0</damping><friction>2.0</friction></dynamics>
   </joint>
 
   <!-- ====== 后右驱动轮 ====== -->
   <link name="rear_right_wheel">
     <pose>-0.25 0.30 0.00 0 0 0</pose>
-    <inertial><mass>0.8</mass>
+    <inertial><mass>0.2</mass>
       <inertia><ixx>0.008</ixx><iyy>0.008</iyy><izz>0.016</izz></inertia></inertial>
     <collision name="c">
       <pose>0 0 0 -1.5707 0 0</pose>
@@ -382,7 +382,7 @@
     <parent>base_link</parent>
     <child>rear_right_wheel</child>
     <axis><xyz>0 1 0</xyz></axis>
-    <dynamics><damping>3.0</damping><friction>2.0</friction></dynamics>
+    <dynamics><damping>10.0</damping><friction>2.0</friction></dynamics>
   </joint>
 
   <!-- ====== 前左从动轮 ====== -->

@@ -20,6 +20,7 @@ def generate_launch_description():
     pkg_fast_lio = get_package_share_directory('fast_lio')
     pkg_ros_gz_sim = get_package_share_directory('ros_gz_sim')
     pkg_navigation = get_package_share_directory('robot_navigation')
+    pkg_nav2_bringup = get_package_share_directory('nav2_bringup')
 
     world_file = os.path.join(pkg_bringup, 'worlds', 'ball_robot.sdf')
     bridge_config = os.path.join(pkg_bringup, 'config', 'gz_bridge.yaml')
@@ -153,6 +154,13 @@ def generate_launch_description():
         ),
     )
 
+    # 8. Nav2 导航: 路径规划 + 避障 + 速度控制
+    navigation = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(pkg_navigation, 'launch', 'navigation.launch.py')
+        ),
+    )
+
     return LaunchDescription([
         DeclareLaunchArgument('headless', default_value='false'),
         gz_sim,
@@ -163,5 +171,6 @@ def generate_launch_description():
         TimerAction(period=6.0, actions=[lidar_fusion]),
         TimerAction(period=6.0, actions=[fast_lio]),
         TimerAction(period=8.0, actions=[mapping]),      # 等 FAST-LIO 出云
-        TimerAction(period=12.0, actions=[rviz]),
+        TimerAction(period=18.0, actions=[navigation]),
+        TimerAction(period=20.0, actions=[rviz]),
     ])

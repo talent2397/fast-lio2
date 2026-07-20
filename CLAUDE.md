@@ -104,6 +104,7 @@ INIT → EXPLORE → VERIFY → NAVIGATE → REACHED
 - 分支：`main`
 - 每次功能完成 commit，消息用中文
 - `build/`、`install/`、`log/` 已 gitignore
+- **仅在用户明确要求时才执行 git commit 和 git push，不要自动提交**
 
 ## 编译命令
 

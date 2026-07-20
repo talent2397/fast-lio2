@@ -1,21 +1,30 @@
 #!/usr/bin/env python3
 """
-2D 地图与导航启动 — pointcloud_to_laserscan + slam_toolbox
+2D 地图启动 — pointcloud_to_laserscan + slam_toolbox
 
 地图管线:
   FAST-LIO /cloud_registered → pointcloud_to_laserscan → /scan
   /scan + /robot/odom → slam_toolbox (online_async) → /map
 
-用法:
-  ros2 launch robot_navigation mapping.launch.py
+slam_toolbox 是 Lifecycle 节点，必须发送 CONFIGURE→ACTIVATE 事件。
 """
+import os
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch_ros.actions import Node
+from launch.actions import EmitEvent, RegisterEventHandler, LogInfo
+from launch.events import matches_action
+from launch_ros.actions import Node, LifecycleNode
+from launch_ros.event_handlers import OnStateTransition
+from launch_ros.events.lifecycle import ChangeState
+from lifecycle_msgs.msg import Transition
 
 
 def generate_launch_description():
+    pkg_nav = get_package_share_directory('robot_navigation')
+    slam_params = os.path.join(pkg_nav, 'config', 'slam_toolbox.yaml')
+
     # 1. 3D 点云 → 2D 激光扫描
-    pointcloud_to_laserscan = Node(
+    pcl_node = Node(
         package='pointcloud_to_laserscan',
         executable='pointcloud_to_laserscan_node',
         name='pointcloud_to_laserscan',
@@ -25,12 +34,12 @@ def generate_launch_description():
         ],
         parameters=[{
             'target_frame': 'robot/base_link',
-            'transform_tolerance': 0.05,
+            'transform_tolerance': 0.5,
             'min_height': 0.05,
             'max_height': 2.0,
             'angle_min': -3.14159,
             'angle_max': 3.14159,
-            'angle_increment': 0.0043633,  # ~0.25 deg, 1440 rays
+            'angle_increment': 0.0043633,
             'scan_time': 0.1,
             'range_min': 0.3,
             'range_max': 30.0,
@@ -41,16 +50,43 @@ def generate_launch_description():
         output='screen',
     )
 
-    # 2. slam_toolbox — 2D 占据栅格建图 (online_async)
-    slam_toolbox = Node(
+    # 2. slam_toolbox — Lifecycle 节点 (namespace 必须指定)
+    slam_node = LifecycleNode(
         package='slam_toolbox',
         executable='async_slam_toolbox_node',
         name='slam_toolbox',
-        parameters=[
-            '/home/c/fastlio_ws/src/robot_navigation/config/slam_toolbox.yaml',
-            {'use_sim_time': True},
-        ],
+        namespace='',
+        parameters=[slam_params, {'use_sim_time': True}],
         output='screen',
     )
 
-    return LaunchDescription([pointcloud_to_laserscan, slam_toolbox])
+    # CONFIGURE 事件
+    configure_event = EmitEvent(
+        event=ChangeState(
+            lifecycle_node_matcher=matches_action(slam_node),
+            transition_id=Transition.TRANSITION_CONFIGURE,
+        ),
+    )
+
+    # ACTIVATE 事件（CONFIGURE 完成后自动触发）
+    activate_event = RegisterEventHandler(
+        OnStateTransition(
+            target_lifecycle_node=slam_node,
+            start_state='configuring',
+            goal_state='inactive',
+            entities=[
+                LogInfo(msg='[slam_toolbox] 激活中...'),
+                EmitEvent(event=ChangeState(
+                    lifecycle_node_matcher=matches_action(slam_node),
+                    transition_id=Transition.TRANSITION_ACTIVATE,
+                )),
+            ],
+        ),
+    )
+
+    return LaunchDescription([
+        pcl_node,
+        slam_node,
+        configure_event,
+        activate_event,
+    ])

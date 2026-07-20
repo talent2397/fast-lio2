@@ -26,6 +26,7 @@ setup(
             'yolo_detector = robot_vision.yolo_detector:main',
             'lidar_camera_fusion = robot_vision.lidar_camera_fusion:main',
             'camera_info_publisher = robot_vision.camera_info_publisher:main',
+            'cmd_vel_relay = robot_vision.cmd_vel_relay:main',
         ],
     },
 )
