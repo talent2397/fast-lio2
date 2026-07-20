@@ -8,7 +8,7 @@ source /opt/ros/jazzy/setup.bash
 source $WS/install/setup.bash 2>/dev/null || true
 
 echo "清理旧进程..."
-pkill -f "gz sim|ros_gz_bridge|fastlio_mapping|multi_image_view|drive_control|camera_info_publisher|yolo_detector|lidar_camera_fusion" 2>/dev/null || true
+pkill -f "gz sim|ros_gz_bridge|fastlio_mapping|multi_image_view|drive_control|camera_info_publisher|yolo_detector|lidar_camera_fusion|smart_navigator|simple_navigator|explore_coordinator|auto_explorer|pointcloud_to_laserscan|slam_toolbox" 2>/dev/null || true
 sleep 2
 
 # ── 窗口 2: 三合一图像 ──

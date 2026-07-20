@@ -33,11 +33,15 @@ except ImportError:
 # Target definitions
 TARGET_CLASSES_YOLO = {32: 'sports ball', 56: 'chair', 0: 'person'}
 
-# HSV ranges for RED ball (two ranges because red wraps around 0/180 in HSV)
-RED_LOWER_1 = np.array([0, 30, 40])
-RED_UPPER_1 = np.array([15, 255, 255])
-RED_LOWER_2 = np.array([160, 30, 40])
+# HSV ranges for RED ball (双阈值融合, 红色在 H 两端: 0-10 & 160-180)
+# S_min=100 V_min=70: 过滤低饱和度/低亮度像素, 大幅减少误检
+RED_LOWER_1 = np.array([0, 100, 70])
+RED_UPPER_1 = np.array([10, 255, 255])
+RED_LOWER_2 = np.array([160, 100, 70])
 RED_UPPER_2 = np.array([180, 255, 255])
+# 形状验证: 最小面积 300, 球体接近正方形 (宽高比 0.6-1.6)
+MIN_BALL_AREA = 300
+BALL_ASPECT_RATIO = (0.5, 2.0)
 
 
 class YoloDetector(Node):
@@ -85,9 +89,17 @@ class YoloDetector(Node):
         results = []
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area < 200:   # ignore noise
+            if area < MIN_BALL_AREA:
                 continue
             x, y, w, h = cv2.boundingRect(cnt)
+            # 形状验证: 过滤长条状噪声 (宽高比检查)
+            aspect = w / max(h, 1)
+            if aspect < BALL_ASPECT_RATIO[0] or aspect > BALL_ASPECT_RATIO[1]:
+                continue
+            # 外接矩形填充率检查 (>30% 才算有效)
+            fill_ratio = area / (w * h)
+            if fill_ratio < 0.3:
+                continue
             cx = x + w / 2.0
             cy = y + h / 2.0
             results.append((cx, cy, float(w), float(h)))

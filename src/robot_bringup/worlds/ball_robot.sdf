@@ -219,7 +219,7 @@
 
 <!-- ====== 检测目标: 红色球体 (椅子不可见面, 球在 NE区货架旁) ====== -->
 <model name="target_ball"><static>true</static>
-  <pose>5 0 0.5 0 0 0</pose>
+  <pose>12 8 0.5 0 0 0</pose>
   <link name="ball">
     <visual name="v">
       <geometry><sphere><radius>0.35</radius></sphere></geometry>
@@ -334,8 +334,8 @@
     <right_joint>rear_right_joint</right_joint>
     <wheel_separation>0.60</wheel_separation>
     <wheel_radius>0.20</wheel_radius>
-    <max_linear_acceleration>0.8</max_linear_acceleration>
-    <max_angular_acceleration>1.5</max_angular_acceleration>
+    <max_linear_acceleration>3.0</max_linear_acceleration>
+    <max_angular_acceleration>4.0</max_angular_acceleration>
     <odom_publish_frequency>30</odom_publish_frequency>
   </plugin>
 
@@ -359,7 +359,7 @@
     <parent>base_link</parent>
     <child>rear_left_wheel</child>
     <axis><xyz>0 1 0</xyz></axis>
-    <dynamics><damping>10.0</damping><friction>2.0</friction></dynamics>
+    <dynamics><damping>6.0</damping><friction>2.0</friction></dynamics>
   </joint>
 
   <!-- ====== 后右驱动轮 ====== -->
@@ -382,7 +382,7 @@
     <parent>base_link</parent>
     <child>rear_right_wheel</child>
     <axis><xyz>0 1 0</xyz></axis>
-    <dynamics><damping>10.0</damping><friction>2.0</friction></dynamics>
+    <dynamics><damping>6.0</damping><friction>2.0</friction></dynamics>
   </joint>
 
   <!-- ====== 前左从动轮 ====== -->

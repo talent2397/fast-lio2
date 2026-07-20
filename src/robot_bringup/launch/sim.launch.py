@@ -20,7 +20,6 @@ def generate_launch_description():
     pkg_fast_lio = get_package_share_directory('fast_lio')
     pkg_ros_gz_sim = get_package_share_directory('ros_gz_sim')
     pkg_navigation = get_package_share_directory('robot_navigation')
-    pkg_nav2_bringup = get_package_share_directory('nav2_bringup')
 
     world_file = os.path.join(pkg_bringup, 'worlds', 'ball_robot.sdf')
     bridge_config = os.path.join(pkg_bringup, 'config', 'gz_bridge.yaml')
@@ -50,6 +49,15 @@ def generate_launch_description():
         executable='static_transform_publisher',
         name='static_tf_camera_to_odom',
         arguments=['0', '0', '0', '0', '0', '0', 'camera_init', 'robot/odom'],
+    )
+
+    # 3.0 静态 TF: map → robot/odom (identity, Nav2 激活需要)
+    # slam_toolbox 启动后会动态更新此变换
+    static_tf_map_odom = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='static_tf_map_to_odom',
+        arguments=['0', '0', '0', '0', '0', '0', 'map', 'robot/odom'],
     )
 
     # 3.1 静态 TF: robot/base_link → robot/lidar_link (SDF: 0, 0, 0.40)
@@ -127,7 +135,7 @@ def generate_launch_description():
         executable='yolo_detector',
         name='yolo_detector',
         parameters=[
-            {'inference_every': 2},
+            {'inference_every': 1},
             {'use_sim_time': True},
         ],
         output='screen',
@@ -154,23 +162,32 @@ def generate_launch_description():
         ),
     )
 
-    # 8. Nav2 导航: 路径规划 + 避障 + 速度控制
-    navigation = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(pkg_navigation, 'launch', 'navigation.launch.py')
-        ),
+    # 8. 全自动探索导航: 边建图边探索 + A* 路径 + 目标追踪
+    auto_explorer = Node(
+        package='robot_navigation',
+        executable='auto_explorer',
+        name='auto_explorer',
+        parameters=[{
+            'use_sim_time': True,
+            'max_v': 1.5,
+            'max_w': 1.5,
+            'goal_dist': 2.0,
+            'obs_stop': 0.8,
+            'spin_speed': 0.8,
+        }],
+        output='screen',
     )
 
     return LaunchDescription([
         DeclareLaunchArgument('headless', default_value='false'),
         gz_sim,
         TimerAction(period=3.0, actions=[bridge]),
-        TimerAction(period=3.5, actions=[static_tf, static_tf_lidar, static_tf_camera, static_tf_lidar_sensor, static_tf_camera_sensor, static_tf_camera_optical]),
+        TimerAction(period=3.5, actions=[static_tf, static_tf_map_odom, static_tf_lidar, static_tf_camera, static_tf_lidar_sensor, static_tf_camera_sensor, static_tf_camera_optical]),
         TimerAction(period=5.0, actions=[camera_info]),
         TimerAction(period=5.5, actions=[yolo_detector]),
         TimerAction(period=6.0, actions=[lidar_fusion]),
         TimerAction(period=6.0, actions=[fast_lio]),
         TimerAction(period=8.0, actions=[mapping]),      # 等 FAST-LIO 出云
-        TimerAction(period=18.0, actions=[navigation]),
-        TimerAction(period=20.0, actions=[rviz]),
+        TimerAction(period=10.0, actions=[auto_explorer]),
+        TimerAction(period=14.0, actions=[rviz]),
     ])
