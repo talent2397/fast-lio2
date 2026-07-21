@@ -116,7 +116,7 @@ def generate_launch_description():
         executable='fastlio_mapping',
         name='fastlio_mapping',
         parameters=[fastlio_params, {'use_sim_time': True}],
-        output='screen',
+        output='log',   # 不刷终端, 关键日志在 ~/.ros/log/
     )
 
     # 5. RViz2

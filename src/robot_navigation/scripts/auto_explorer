@@ -41,6 +41,7 @@ class AutoExplorer(Node):
         self._diag_t = 0.0
         self._odom_n = 0
         self._back_t = 0.0; self._back_dir = 0.8; self._back_dir_locked = False
+        self._post_brake_t = 0.0  # 硬刹车退出后强制转弯计时
 
         # 直接订阅 /scan (cloud_to_scan已做好3D→2D转换, 720rays robot/base_link帧)
         self.create_subscription(LaserScan, '/scan', self._scan, qos_profile_sensor_data)
@@ -81,7 +82,7 @@ class AutoExplorer(Node):
         return int(np.count_nonzero(self.map==0)) > self.map.size*0.01
 
     # ═══ 硬刹车: 前半球有3个点<0.5m就后退 ═══
-    # ═══ 硬刹车: 前方<1.0m就后退, >3m解锁 ═══
+    # ═══ 硬刹车: 前方<1.0m就后退, 退出后强制转弯 ═══
     def _hard_brake(self):
         if self.scan_ranges is None or self._scan_valid < 5:
             return False
@@ -93,6 +94,7 @@ class AutoExplorer(Node):
         hits = sum(1 for v in fv if v < 1.0)
 
         if hits >= 3 and front_min < 1.0:
+            was_locked = self._back_dir_locked
             if not self._back_dir_locked:
                 q = n//4
                 l = min((v for v in [self.scan_ranges[i%n] for i in range(mid, mid+q)]
@@ -102,11 +104,16 @@ class AutoExplorer(Node):
                 self._back_dir = 1.0 if l > r else -1.0
                 self._back_dir_locked = True
                 self.get_logger().warn(f'HARD BRAKE! F={front_min:.2f}m')
-            self._back_t = 0.8; self.path = []; self._stuck = 0.0
+            self._back_t = 1.2; self.path = []; self._stuck = 0.0  # 1.2s后退出0.6m
             return True
 
-        if front_min > 3.0:
-            self._back_dir_locked = False; self._back_t = 0.0; return False
+        if self._back_dir_locked and front_min > 3.0:
+            # 刚解除 → 触发强制转弯
+            self._back_dir_locked = False; self._back_t = 0.0
+            self._post_brake_t = 3.0  # 原地转弯3秒(~120°)彻底避开
+            self.get_logger().info(f'Brake released, post-turn {self._back_dir}')
+            return False
+        return False
         return False
 
         # ═══ 势场 ═══
@@ -268,7 +275,7 @@ class AutoExplorer(Node):
                 fmin = fv[0] if fv else 99.0
             self.get_logger().info(
                 f'[DIAG] F_min={fmin:.2f}m state={self.state} '
-                f'odom={self._odom_n} back={self._back_t:.1f}')
+                f'odom={self._odom_n} back={self._back_t:.1f} pt={self._post_brake_t:.1f}')
 
         # ── 最高优先级: 硬刹车 (SPIN_WAIT期间不触发) ──
         if self.state != 'SPIN_WAIT' and self._back_t > 0:
@@ -278,6 +285,13 @@ class AutoExplorer(Node):
             self.pub.publish(c); return
 
         if self.state != 'SPIN_WAIT' and self._hard_brake():
+            self.pub.publish(c); return
+
+        # ── 硬刹车后原地转弯 (避免回头撞同一根柱子) ──
+        if self._post_brake_t > 0:
+            self._post_brake_t -= 0.05
+            self.path = []; self._path_target = None; self._vst.clear()
+            c.linear.x = -0.1; c.angular.z = self._back_dir * 1.0  # 微退+快转
             self.pub.publish(c); return
 
         # ── 目标检测 (优先级最高, SPIN_WAIT也会被中断) ──
@@ -311,7 +325,7 @@ class AutoExplorer(Node):
             map_ok = self._map_ready()
             tmout = (now - self._spin_start) > SPIN_TIMEOUT
             if (spun and map_ok) or (spun and tmout):
-                self._stuck = 0.0; self._no_ft_count = 0; self.state = 'EXPLORE'
+                self._stuck = 0.0; self._no_ft_count = 0; self._post_brake_t = 0.0; self.state = 'EXPLORE'
                 free = np.count_nonzero(self.map == 0) if self.map is not None else 0
                 rsn = 'map_ok' if map_ok else f'timeout({now-self._spin_start:.0f}s)'
                 self.get_logger().info(f'→EXPLORE ({rsn}, spin={self._spin:.1f}rad, free={free})')
@@ -385,7 +399,8 @@ class AutoExplorer(Node):
         if self._stuck > 5.0:
             self.get_logger().warn(f'stuck={self._stuck:.1f}s')
             c.angular.z = 1.2
-            self._stuck = 0.0; self.path = []; self._vst.clear(); self._no_ft_count = 0
+            self._stuck = 0.0; self.path = []; self._vst.clear()
+            self._no_ft_count = 0; self._post_brake_t = 0.0
             self.pub.publish(c); return
 
         if self._no_ft_count > 5:
