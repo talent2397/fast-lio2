@@ -11,7 +11,7 @@ FULL_CIRCLE = 2*math.pi; SPIN_TIMEOUT = 20.0  # 20s超时(原40s太长)
 MAX_V = 0.8; MAX_W = 1.5; GOAL_DIST = 2.0; SPIN_SPD = 0.8
 
 # 势场参数
-K_REP = 1.5; K_ATT = 0.8; K_ANG = 2.0; D_SAFE = 2.5; D_BACK = 0.5
+K_REP = 1.5; K_ATT = 0.8; K_ANG = 2.0; D_SAFE = 2.5; D_BACK = 1.0
 W_GAIN = 2.0; W_DIST = 2.0; W_TURN = 1.5
 
 from rclpy.node import Node
@@ -23,25 +23,28 @@ from vision_msgs.msg import Detection2DArray
 
 
 def _cloud_to_scan_ranges(cloud_msg):
-    """原始 LiDAR (robot/lidar_link) → 720 rays 距离数组"""
+    """LiDAR点云(传感器局部帧) → 720 rays. z≈0为传感器高度, 地面z≈-0.60m."""
     n_rays = 720; angle_inc = 2.0*math.pi/n_rays
     ranges = np.full(n_rays, np.inf, dtype=np.float32)
     try:
         pt_step = cloud_msg.point_step; pad = max(0, pt_step-12)
-        dt = np.dtype([('x', np.float32), ('y', np.float32), ('z', np.float32),
-                        ('_pad', f'V{pad}')])
+        dt = np.dtype([('x',np.float32),('y',np.float32),('z',np.float32),('_pad',f'V{pad}')])
         arr = np.frombuffer(cloud_msg.data, dtype=dt, count=cloud_msg.width)
     except Exception:
         return ranges, 0
     x = arr['x'].astype(np.float64); y = arr['y'].astype(np.float64)
     z = arr['z'].astype(np.float64)
-    hm = (np.abs(z) > 0.05) & (np.abs(z) < 2.0)
+
+    # 高度: 地面z≈-0.58, 墙z∈[-0.50,-0.09]; z>-0.55保留一切高于地面的障碍
+    hm = (z > -0.55) & (z < 2.5)
     if np.count_nonzero(hm) < 10: return ranges, 0
     x, y = x[hm], y[hm]
+
     dists = np.sqrt(x*x + y*y)
-    dm = (dists > 0.3) & (dists < 30.0)
+    dm = (dists > 0.5) & (dists < 30.0)
     if np.count_nonzero(dm) < 5: return ranges, 0
     x, y, dists = x[dm], y[dm], dists[dm]
+
     angles = np.arctan2(y, x)
     idx = np.clip(((angles+math.pi)/angle_inc).astype(np.int32), 0, n_rays-1)
     order = np.argsort(idx); i_s, d_s = idx[order], dists[order]
@@ -86,8 +89,21 @@ class AutoExplorer(Node):
     def _raw_lidar(self, m):
         self.scan_ranges, self._scan_valid = _cloud_to_scan_ranges(m)
         self._proc_n += 1
-        if self._proc_n % 50 == 0:
-            self.get_logger().info(f'[LIDAR] {m.width}pt→{self._scan_valid}/720ray')
+        if self._proc_n % 20 == 0:
+            # 诊断: dump z值范围帮助调过滤参数
+            try:
+                ps=m.point_step; pad=max(0,ps-12)
+                dt=np.dtype([('x',np.float32),('y',np.float32),('z',np.float32),('_pad',f'V{pad}')])
+                arr=np.frombuffer(m.data,dtype=dt,count=m.width)
+                zz=arr['z'].astype(np.float64)
+                n_h=int(np.count_nonzero((zz>-0.25)&(zz<1.5)))
+                self.get_logger().info(
+                    f'[LIDAR] {m.width}pt→{self._scan_valid}/720ray '
+                    f'z∈[{zz.min():.2f},{zz.max():.2f}] n_z_pass={n_h} '
+                    f'ps={m.point_step} frm={m.header.frame_id}',
+                    throttle_duration_sec=2.0)
+            except Exception as e:
+                self.get_logger().warn(f'LIDAR diag err: {e}')
 
     def _odom(self, m):
         self._odom_n += 1
@@ -112,28 +128,24 @@ class AutoExplorer(Node):
         return int(np.count_nonzero(self.map==0)) > self.map.size*0.01
 
     # ═══ 硬刹车: 前半球有3个点<0.5m就后退 ═══
+    # ═══ 硬刹车: 前方<1.0m就后退, >3m解锁 ═══
     def _hard_brake(self):
         if self.scan_ranges is None or self._scan_valid < 5:
             return False
-        n = len(self.scan_ranges); mid = n//2
-        # 前方窄锥一次扫描, 与 DIAG 保持一致 (±18° aprox)
-        cone = n // 10
-        # 找前锥最小距离
+        n = len(self.scan_ranges); mid = n//2; cone = n//10
         fv = [self.scan_ranges[i%n] for i in range(mid-cone, mid+cone+1)
-              if 0.2 < self.scan_ranges[i%n] < 30
+              if 0.5 < self.scan_ranges[i%n] < 30
               and not math.isinf(self.scan_ranges[i%n])]
         front_min = min(fv) if fv else 99.0
-        # 统计<0.5m的点数
-        hits = sum(1 for v in fv if v < 0.5)
+        hits = sum(1 for v in fv if v < 1.0)
 
-        if hits >= 3:
-            # 前方<0.5m → 锁死后退方向, 向开阔侧退
+        if hits >= 3 and front_min < 1.0:
             if not self._back_dir_locked:
                 q = n//4
                 l = min((v for v in [self.scan_ranges[i%n] for i in range(mid, mid+q)]
-                        if 0.3<v<30), default=99.0)
+                        if 0.5<v<30), default=99.0)
                 r = min((v for v in [self.scan_ranges[i%n] for i in range(mid-q, mid)]
-                        if 0.3<v<30), default=99.0)
+                        if 0.5<v<30), default=99.0)
                 self._back_dir = 1.0 if l > r else -1.0
                 self._back_dir_locked = True
                 self.get_logger().warn(f'HARD BRAKE! F={front_min:.2f}m')
@@ -141,14 +153,12 @@ class AutoExplorer(Node):
             return True
 
         if front_min > 3.0:
-            # 前方 > 3m → 解锁
             self._back_dir_locked = False; self._back_t = 0.0; return False
-
-        # 0.5 < front_min < 3.0: 不后退
         return False
 
         # ═══ 势场 ═══
     def _potential_field(self, goal_wx, goal_wy):
+        """排斥力在机器人局部坐标系计算, 然后转到世界坐标系 + 世界引力"""
         if self.scan_ranges is None or self._scan_valid < 5:
             return 0.0, 0.0
         n = len(self.scan_ranges); fx, fy = 0.0, 0.0
@@ -156,7 +166,7 @@ class AutoExplorer(Node):
         mid = n // 2
         for i in range(0, n, step):
             d = self.scan_ranges[i]
-            if not (0.3 < d < 30): continue
+            if not (0.5 < d < 30): continue
             if math.isinf(d): continue
             # 只排斥前方半球 (±135°), 背后无视
             angle = -math.pi + i*(2.0*math.pi/n)
@@ -168,15 +178,23 @@ class AutoExplorer(Node):
             elif d < D_SAFE: k = K_REP*(D_SAFE/d)**2
             else: k = K_REP*(D_SAFE/d)*0.2
             fx -= k*ca; fy -= k*sa
+
+        # ── 关键修复: 排斥力从机器人局部坐标系转到世界坐标系 ──
+        cos_y, sin_y = math.cos(self.yaw), math.sin(self.yaw)
+        fx_world = fx * cos_y - fy * sin_y
+        fy_world = fx * sin_y + fy * cos_y
+
+        # ── 吸引力 (世界坐标系) ──
         if goal_wx is not None and goal_wy is not None:
             dx = goal_wx - self.pose.x; dy = goal_wy - self.pose.y
             dist = math.hypot(dx, dy)
             if dist > 0.1:
                 att_k = min(K_ATT, K_ATT*dist/3.0)
-                fx += att_k*dx/dist; fy += att_k*dy/dist
-        fm = math.hypot(fx, fy)
+                fx_world += att_k*dx/dist; fy_world += att_k*dy/dist
+
+        fm = math.hypot(fx_world, fy_world)
         if fm < 0.02: return 0.0, 0.0
-        f_ang = math.atan2(fy, fx)
+        f_ang = math.atan2(fy_world, fx_world)
         v = min(MAX_V, fm*0.6)
         err = f_ang - self.yaw; err = math.atan2(math.sin(err), math.cos(err))
         w = max(-MAX_W, min(MAX_W, K_ANG*err))
@@ -293,7 +311,7 @@ class AutoExplorer(Node):
             if self.scan_ranges is not None and self._scan_valid > 5:
                 n = len(self.scan_ranges); mid = n//2; cone = n//12
                 fv = [self.scan_ranges[i%n] for i in range(mid-cone, mid+cone)
-                      if 0.3 < self.scan_ranges[i%n] < 30]
+                      if 0.5 < self.scan_ranges[i%n] < 30]
                 fmin = fv[0] if fv else 99.0
             self.get_logger().info(
                 f'[DIAG] F_min={fmin:.2f}m state={self.state} '
