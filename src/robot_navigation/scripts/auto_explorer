@@ -41,7 +41,9 @@ class AutoExplorer(Node):
         self._diag_t = 0.0
         self._odom_n = 0
         self._back_t = 0.0; self._back_dir = 0.8; self._back_dir_locked = False
-        self._post_brake_t = 0.0  # 硬刹车退出后强制转弯计时
+        self._post_brake_t = 0.0   # 硬刹车退出后强制转弯计时
+        self._brake_count = 0      # 连续硬刹车计数 (2次=死角loop)
+        self._brake_pos = None     # 上次硬刹车位置, 用于禁区标记
 
         # 直接订阅 /scan (cloud_to_scan已做好3D→2D转换, 720rays robot/base_link帧)
         self.create_subscription(LaserScan, '/scan', self._scan, qos_profile_sensor_data)
@@ -81,8 +83,7 @@ class AutoExplorer(Node):
         if self.map is None: return False
         return int(np.count_nonzero(self.map==0)) > self.map.size*0.01
 
-    # ═══ 硬刹车: 前半球有3个点<0.5m就后退 ═══
-    # ═══ 硬刹车: 前方<1.0m就后退, 退出后强制转弯 ═══
+    # ═══ 硬刹车: 前方<1.0m后退, 标记禁区防loop ═══
     def _hard_brake(self):
         if self.scan_ranges is None or self._scan_valid < 5:
             return False
@@ -94,26 +95,29 @@ class AutoExplorer(Node):
         hits = sum(1 for v in fv if v < 1.0)
 
         if hits >= 3 and front_min < 1.0:
-            was_locked = self._back_dir_locked
+            # 标记当前位置为禁区
+            if self.pose is not None:
+                mk = (round(self.pose.x/3), round(self.pose.y/3))
+                self._vst.add(mk)
             if not self._back_dir_locked:
+                self._brake_count += 1
                 q = n//4
-                l = min((v for v in [self.scan_ranges[i%n] for i in range(mid, mid+q)]
+                l = min((v for v in [self.scan_ranges[i%n] for i in range(mid,mid+q)]
                         if 0.5<v<30), default=99.0)
-                r = min((v for v in [self.scan_ranges[i%n] for i in range(mid-q, mid)]
+                r = min((v for v in [self.scan_ranges[i%n] for i in range(mid-q,mid)]
                         if 0.5<v<30), default=99.0)
                 self._back_dir = 1.0 if l > r else -1.0
                 self._back_dir_locked = True
-                self.get_logger().warn(f'HARD BRAKE! F={front_min:.2f}m')
-            self._back_t = 1.2; self.path = []; self._stuck = 0.0  # 1.2s后退出0.6m
+                loop = '(LOOP!)' if self._brake_count >= 2 else ''
+                self.get_logger().warn(f'HARD BRAKE! F={front_min:.2f}m #{self._brake_count} {loop}')
+            self._back_t = 1.2; self.path = []; self._stuck = 0.0
             return True
 
         if self._back_dir_locked and front_min > 3.0:
-            # 刚解除 → 触发强制转弯
             self._back_dir_locked = False; self._back_t = 0.0
-            self._post_brake_t = 3.0  # 原地转弯3秒(~120°)彻底避开
-            self.get_logger().info(f'Brake released, post-turn {self._back_dir}')
+            self._post_brake_t = 3.0
+            self.get_logger().info(f'Brake released, post-turn')
             return False
-        return False
         return False
 
         # ═══ 势场 ═══
@@ -287,11 +291,18 @@ class AutoExplorer(Node):
         if self.state != 'SPIN_WAIT' and self._hard_brake():
             self.pub.publish(c); return
 
-        # ── 硬刹车后原地转弯 (避免回头撞同一根柱子) ──
+        # ── 硬刹车后原地转弯 (避免回头撞同一障碍) ──
         if self._post_brake_t > 0:
             self._post_brake_t -= 0.05
             self.path = []; self._path_target = None; self._vst.clear()
-            c.linear.x = -0.1; c.angular.z = self._back_dir * 1.0  # 微退+快转
+            # loop: 连续刹车≥2 → 反向转 + 转更久
+            if self._brake_count >= 2:
+                c.linear.x = -0.2
+                c.angular.z = -self._back_dir * 1.2  # 反向转180°
+                if self._post_brake_t < 0.1:
+                    self._brake_count = 0  # U-turn完成, 重置
+            else:
+                c.linear.x = -0.1; c.angular.z = self._back_dir * 1.0
             self.pub.publish(c); return
 
         # ── 目标检测 (优先级最高, SPIN_WAIT也会被中断) ──
@@ -368,6 +379,7 @@ class AutoExplorer(Node):
                 self.path = []; self._path_target = None
                 if self._last_goal: self._vst.add(self._last_goal)
                 self.get_logger().info(f'到达前沿 #{self._cnt}'); self._stuck = 0.0
+                self._brake_count = 0  # 正常到达, 重置刹车计数
             self.pub.publish(c); return
 
         los_recent = (now - self._los_fail_t) < 1.0
