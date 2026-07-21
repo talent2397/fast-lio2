@@ -8,27 +8,30 @@ source /opt/ros/jazzy/setup.bash
 source $WS/install/setup.bash 2>/dev/null || true
 
 echo "清理旧进程..."
-# 用 pgrep + kill -9 确保100%杀死
+# 用 pgrep + kill -9 确保100%杀死 (含 static_transform_publisher 防僵尸累积)
 for proc in "gz sim" "gz server" "gz gui" "parameter_bridge" \
   "fastlio_mapping" "cloud_to_scan" "async_slam_toolbox_node" \
   "yolo_detector" "lidar_camera_fusion" "camera_info_publisher" \
   "auto_explorer" "rviz2" "multi_image_view" "drive_control" \
   "pointcloud_to_laserscan" "explore_coordinator" "smart_navigator" \
-  "simple_navigator"; do
+  "simple_navigator" "static_transform_publisher" "ros2 daemon"; do
   pids=$(pgrep -f "$proc" 2>/dev/null) || true
   [ -n "$pids" ] && kill -9 $pids 2>/dev/null || true
 done
 sleep 3
 
-# 验证干净
-LEFT=$(ps aux | grep -cE 'gz sim|fastlio|cloud_to_scan|slam_toolbox|yolo_detect|fusion|auto_exp|rviz2|ros_gz_bridge|multi_img|drive_con|camera_info_pub' 2>/dev/null || echo 0)
+# 验证干净 (含static_transform_publisher)
+LEFT=$(ps aux | grep -cE 'gz sim|fastlio|cloud_to_scan|slam_toolbox|yolo_detect|fusion|auto_exp|rviz2|ros_gz_bridge|multi_img|drive_con|camera_info_pub|static_transform' 2>/dev/null || echo 0)
 if [ "$LEFT" -gt 2 ]; then
   echo "⚠ 仍有${LEFT}个残留进程, 二次清理..."
-  kill -9 $(ps aux | grep -E 'gz sim|fastlio|cloud_to_scan|slam_toolbox|yolo|fusion|auto_explorer|rviz2|ros_gz_bridge' | grep -v grep | awk '{print $2}') 2>/dev/null || true
+  kill -9 $(ps aux | grep -E 'gz sim|fastlio|cloud_to_scan|slam_toolbox|yolo|fusion|auto_explorer|rviz2|ros_gz_bridge|static_transform' | grep -v grep | awk '{print $2}') 2>/dev/null || true
   sleep 2
 fi
 
-# 清理 DDS 共享内存
+# 终极清理: 杀当前用户所有ros2/gazebo僵尸(排除firefox/snap)
+pkill -9 -u c -f "static_transform_publisher" 2>/dev/null || true
+
+# 清理 DDS 共享内存 (防止端口冲突)
 rm -rf /dev/shm/fastrtps_* /dev/shm/fastdds_* /dev/shm/*port* 2>/dev/null || true
 unset FASTRTPS_DEFAULT_PROFILES_FILE
 

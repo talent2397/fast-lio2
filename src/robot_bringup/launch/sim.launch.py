@@ -192,11 +192,12 @@ def generate_launch_description():
         gz_sim,
         TimerAction(period=3.0, actions=[bridge]),
         TimerAction(period=3.5, actions=[static_tf, static_tf_camera_to_world, static_tf_map_odom, static_tf_lidar, static_tf_camera, static_tf_lidar_sensor, static_tf_camera_sensor, static_tf_camera_optical]),
-        TimerAction(period=5.0, actions=[camera_info]),
-        TimerAction(period=5.5, actions=[yolo_detector]),
-        TimerAction(period=6.0, actions=[lidar_fusion]),
-        TimerAction(period=6.0, actions=[fast_lio]),
-        TimerAction(period=8.0, actions=[mapping]),      # 等 FAST-LIO 出云
+        # v17.1: Vision管线直接启动(TimerAction会导致camera_info丢失)
+        camera_info,
+        TimerAction(period=1.0, actions=[yolo_detector]),
+        TimerAction(period=1.0, actions=[lidar_fusion]),
+        TimerAction(period=5.0, actions=[fast_lio]),
+        TimerAction(period=8.0, actions=[mapping]),
         TimerAction(period=10.0, actions=[auto_explorer]),
         TimerAction(period=14.0, actions=[rviz]),
     ])
