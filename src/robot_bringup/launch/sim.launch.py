@@ -156,7 +156,7 @@ def generate_launch_description():
         name='lidar_camera_fusion',
         parameters=[
             {'min_points_in_bbox': 5},
-            {'sync_slop': 0.2},
+            {'sync_slop': 0.5},  # 放宽同步窗口, 检测扫过时给融合更多机会
             {'output_frame': 'robot/odom'},
             {'enable_debug_img': True},
             {'use_sim_time': True},

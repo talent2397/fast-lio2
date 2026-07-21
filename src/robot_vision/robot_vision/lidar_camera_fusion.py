@@ -77,10 +77,7 @@ class LidarCameraFusion(Node):
     def _img_cb(self, msg): self.latest_img = msg
 
     def _on_sync(self, cloud_msg, det_msg):
-        """节流到 5Hz, 快速 TF 缓存"""
-        now = time.time()
-        if now - self._last_proc < 0.18: return  # 5Hz max
-        self._last_proc = now
+        """移除节流, 每次sync都处理 — 检测窗口太窄不能丢"""
         self._cnt += 1
 
         if not self.cam_ok or not det_msg.detections:

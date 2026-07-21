@@ -220,7 +220,7 @@ class AutoExplorer(Node):
                         nr,nc=rr+dr,cc+dc
                         if (nr,nc) in fs and (nr,nc) not in vis:
                             vis.add((nr,nc)); q.append((nr,nc))
-            if len(cl)>=8: clusters.append(cl)
+            if len(cl)>=5: clusters.append(cl)
         return [(mc*r+ox+r/2, mr*r+oy+r/2, len(cl))
                 for cl in clusters
                 for mr in [sum(c[0] for c in cl)/len(cl)]
@@ -294,13 +294,30 @@ class AutoExplorer(Node):
         if self.state != 'SPIN_WAIT' and self._hard_brake():
             self.pub.publish(c); return
 
-        # ── 目标切换 (移到 SPIN_WAIT 前面, 检测优先级最高) ──
-        if self.last_det is not None and self.fusion_tgt is not None:
+        # ── 目标检测 (优先级最高, SPIN_WAIT也会被中断) ──
+        det_fresh = False
+        if self.last_det is not None:
             dt = (self.get_clock().now() - self.last_det).nanoseconds / 1e9
-            if self.state != 'CHASE' and dt < 3.0:
+            det_fresh = dt < 4.0
+
+        # 检测到目标且还没3D坐标 → 暂停稳住, 慢转扫视等fusion同步
+        if det_fresh and self.fusion_tgt is None and self.state not in ('CHASE', 'REACHED'):
+            if now - self._log_t > 2.0:
+                self._log_t = now
+                self.get_logger().info(f'ACQUIRE: holding for fusion 3D... '
+                                        f'(state was {self.state})')
+            c.linear.x = 0.0; c.angular.z = 0.35
+            self.pub.publish(c); return
+
+        # 有检测且有3D → 切CHASE追踪
+        if det_fresh and self.fusion_tgt is not None:
+            if self.state not in ('CHASE', 'REACHED'):
                 self.state = 'CHASE'; self.path = []; self._path_target = None
-                if self.state == 'SPIN_WAIT':
-                    self.get_logger().info('SPIN→CHASE (YOLO检测到目标)')
+                self.get_logger().info('→CHASE (target locked)')
+        # 检测丢失 → 回EXPLORE
+        elif not det_fresh and self.state == 'CHASE':
+            self.state = 'EXPLORE'; self.path = []; self._path_target = None
+            self.get_logger().info('CHASE→EXPLORE (target lost)')
 
         # ── SPIN_WAIT ──
         if self.state == 'SPIN_WAIT':
@@ -319,22 +336,11 @@ class AutoExplorer(Node):
                 self.get_logger().info(f'SPIN_WAIT: {self._spin:.1f}/{FULL_CIRCLE*1.2:.1f}rad free={fn}')
             c.angular.z = SPIN_SPD; self.pub.publish(c); return
 
-        # ── 检测降级: 有检测但无fusion坐标 → 慢速旋转观察 ──
-        if self.last_det is not None and self.fusion_tgt is None:
-            dt = (self.get_clock().now() - self.last_det).nanoseconds / 1e9
-            if dt < 3.0:
-                if now - self._log_t > 3.0:
-                    self._log_t = now
-                    self.get_logger().info(f'DETECTED but no fusion 3D, rotating... ({dt:.1f}s ago)')
-                v, _ = self._potential_field(None, None)
-                c.linear.x = max(v, 0.1); c.angular.z = 0.5
-                self.pub.publish(c); return
-
         # ── CHASE ──
         if self.state == 'CHASE':
             if self.fusion_tgt is None:
-                v, _ = self._potential_field(None, None)
-                c.linear.x = max(v, 0.1); c.angular.z = 0.5; self.pub.publish(c); return
+                # 有检测但还不知道3D位置 → 慢转等fusion
+                c.linear.x = 0.0; c.angular.z = 0.35; self.pub.publish(c); return
             tp = self.fusion_tgt.pose.position
             d = math.hypot(tp.x-self.pose.x, tp.y-self.pose.y)
             if d < GOAL_DIST:
@@ -345,9 +351,6 @@ class AutoExplorer(Node):
             gy = tp.y - GOAL_DIST*math.sin(ang_tgt)
             v, w = self._potential_field(gx, gy)
             c.linear.x = v; c.angular.z = w; self.pub.publish(c); return
-        elif self.state == 'CHASE' and self.fusion_tgt is None:
-            # 退回到探测态
-            pass
 
         # ── REACHED ──
         if self.state == 'REACHED':
@@ -399,7 +402,7 @@ class AutoExplorer(Node):
             self._stuck = 0.0; self.path = []; self._vst.clear(); self._no_ft_count = 0
             self.pub.publish(c); return
 
-        if self._no_ft_count > 10:
+        if self._no_ft_count > 5:
             if now - self._log_t > 3.0:
                 self._log_t = now
                 self.get_logger().info(f'无前沿x{self._no_ft_count}')
@@ -419,8 +422,22 @@ class AutoExplorer(Node):
             v, w = self._potential_field(gx_tgt, gy_tgt)
             c.linear.x = v; c.angular.z = w; self.pub.publish(c); return
 
-        # 兜底: 不动, 旋转观察
-        c.angular.z = 0.4
+        # 兜底: 朝最开阔方向推
+        if self.scan_ranges is not None and self._scan_valid > 5:
+            n = len(self.scan_ranges)
+            best_i, best_d = 0, 0
+            for i in range(0, n, 5):
+                d = self.scan_ranges[i]
+                if 0.5 < d < 30 and not math.isinf(d) and d > best_d:
+                    best_d = d; best_i = i
+            best_angle = self.yaw + (-math.pi + best_i*2*math.pi/n) if best_d > 0 else self.yaw
+            gx_tgt = self.pose.x + 2.0*math.cos(best_angle)
+            gy_tgt = self.pose.y + 2.0*math.sin(best_angle)
+        else:
+            gx_tgt = self.pose.x + math.cos(self.yaw)
+            gy_tgt = self.pose.y + math.sin(self.yaw)
+        v, w = self._potential_field(gx_tgt, gy_tgt)
+        c.linear.x = v; c.angular.z = w
         self.pub.publish(c)
 
 def main(): rclpy.init(); rclpy.spin(AutoExplorer())
