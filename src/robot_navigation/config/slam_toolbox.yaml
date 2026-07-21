@@ -1,6 +1,9 @@
 slam_toolbox:
   ros__parameters:
 
+    # 直接使用 odometry topic
+    odom_topic: /robot/odom
+
     # Plugin params
     solver_plugin: solver_plugins::CeresSolver
     ceres_linear_solver: SPARSE_NORMAL_CHOLESKY
@@ -34,7 +37,7 @@ slam_toolbox:
     max_laser_range: 20.0
     min_laser_range: 0.3
     minimum_time_interval: 0.3
-    transform_timeout: 0.5
+    transform_timeout: 2.0
     tf_buffer_duration: 60.0
     stack_size_to_use: 40000000
 

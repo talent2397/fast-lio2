@@ -51,8 +51,17 @@ def generate_launch_description():
         arguments=['0', '0', '0', '0', '0', '0', 'camera_init', 'robot/odom'],
     )
 
-    # 3.0 静态 TF: map → robot/odom (identity, Nav2 激活需要)
-    # slam_toolbox 启动后会动态更新此变换
+    # 3.0a 静态 TF: camera_init → factory_open
+    # Gazebo 发布 robot pose 在 factory_open 帧, FAST-LIO 在 camera_init 帧
+    # 两者是同一坐标原点的不同名称, 需要 identity TF 连接
+    static_tf_camera_to_world = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='static_tf_camera_to_world',
+        arguments=['0', '0', '0', '0', '0', '0', 'camera_init', 'factory_open'],
+    )
+
+    # 3.0 静态 TF: map → robot/odom (slam_toolbox 动态更新此变换, 静态仅初始化)
     static_tf_map_odom = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
@@ -182,7 +191,7 @@ def generate_launch_description():
         DeclareLaunchArgument('headless', default_value='false'),
         gz_sim,
         TimerAction(period=3.0, actions=[bridge]),
-        TimerAction(period=3.5, actions=[static_tf, static_tf_map_odom, static_tf_lidar, static_tf_camera, static_tf_lidar_sensor, static_tf_camera_sensor, static_tf_camera_optical]),
+        TimerAction(period=3.5, actions=[static_tf, static_tf_camera_to_world, static_tf_map_odom, static_tf_lidar, static_tf_camera, static_tf_lidar_sensor, static_tf_camera_sensor, static_tf_camera_optical]),
         TimerAction(period=5.0, actions=[camera_info]),
         TimerAction(period=5.5, actions=[yolo_detector]),
         TimerAction(period=6.0, actions=[lidar_fusion]),
