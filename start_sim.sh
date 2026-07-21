@@ -8,13 +8,28 @@ source /opt/ros/jazzy/setup.bash
 source $WS/install/setup.bash 2>/dev/null || true
 
 echo "清理旧进程..."
-pkill -f "gz sim|ros_gz_bridge|fastlio_mapping|multi_image_view|drive_control|camera_info_publisher|yolo_detector|lidar_camera_fusion|smart_navigator|simple_navigator|explore_coordinator|auto_explorer|pointcloud_to_laserscan|slam_toolbox|cloud_to_scan" 2>/dev/null || true
-sleep 2
+# 用 pgrep + kill -9 确保100%杀死
+for proc in "gz sim" "gz server" "gz gui" "parameter_bridge" \
+  "fastlio_mapping" "cloud_to_scan" "async_slam_toolbox_node" \
+  "yolo_detector" "lidar_camera_fusion" "camera_info_publisher" \
+  "auto_explorer" "rviz2" "multi_image_view" "drive_control" \
+  "pointcloud_to_laserscan" "explore_coordinator" "smart_navigator" \
+  "simple_navigator"; do
+  pids=$(pgrep -f "$proc" 2>/dev/null) || true
+  [ -n "$pids" ] && kill -9 $pids 2>/dev/null || true
+done
+sleep 3
 
-# 清理 DDS 共享内存残留 (消除 RTPS_TRANSPORT_SHM 错误)
-rm -rf /dev/shm/fastrtps_* /dev/shm/fastdds_* 2>/dev/null || true
+# 验证干净
+LEFT=$(ps aux | grep -cE 'gz sim|fastlio|cloud_to_scan|slam_toolbox|yolo_detect|fusion|auto_exp|rviz2|ros_gz_bridge|multi_img|drive_con|camera_info_pub' 2>/dev/null || echo 0)
+if [ "$LEFT" -gt 2 ]; then
+  echo "⚠ 仍有${LEFT}个残留进程, 二次清理..."
+  kill -9 $(ps aux | grep -E 'gz sim|fastlio|cloud_to_scan|slam_toolbox|yolo|fusion|auto_explorer|rviz2|ros_gz_bridge' | grep -v grep | awk '{print $2}') 2>/dev/null || true
+  sleep 2
+fi
 
-# 清除无效的 FASTRTPS 配置 (消除 XML parser 错误)
+# 清理 DDS 共享内存
+rm -rf /dev/shm/fastrtps_* /dev/shm/fastdds_* /dev/shm/*port* 2>/dev/null || true
 unset FASTRTPS_DEFAULT_PROFILES_FILE
 
 # ── 窗口 2: 三合一图像 ──
