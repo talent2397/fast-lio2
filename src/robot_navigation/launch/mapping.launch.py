@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """
-2D 地图启动 — cloud_to_scan (无TF) + slam_toolbox
+2D 地图 — 自研 cloud_to_scan (odom姿态变换) + slam_toolbox
 
-地图管线:
-  FAST-LIO /cloud_registered → cloud_to_scan (odom姿态) → /scan
-  /scan + /robot/odom → slam_toolbox (online_async) → /map
+  为什么不用 pointcloud_to_laserscan:
+    target_frame=camera_init → scan ranges 相对于世界原点, 机器人移动后即错误
+    target_frame=robot/base_link → TF message_filter 丢帧
+  自研方案: 用 /robot/odom 姿态手动变换, 发布 robot/base_link 帧的 scan
+    → slam_toolbox 不需要 TF 变换 scan → 0 丢帧
 
-优势: cloud_to_scan 直接用 odom 姿态做坐标变换，不走 TF message_filter，
-      彻底消除 "Message Filter dropping message" 问题。
+管线:
+  FAST-LIO /cloud_registered (camera_init) + /robot/odom
+    → cloud_to_scan.py (numpy向量化, odom→base_link变换)
+    → /scan (robot/base_link 帧)
+    → slam_toolbox (scan已在base_link, 无需TF) + auto_explorer
 """
 import os
 from ament_index_python.packages import get_package_share_directory
@@ -24,7 +29,7 @@ def generate_launch_description():
     pkg_nav = get_package_share_directory('robot_navigation')
     slam_params = os.path.join(pkg_nav, 'config', 'slam_toolbox.yaml')
 
-    # 1. 3D 点云 → 2D 激光扫描 (自定义节点, 无 TF 依赖)
+    # 1. 自研 3D→2D: 用 odom 姿态手动变换, 发布 robot/base_link 帧
     pcl_node = Node(
         package='robot_navigation',
         executable='cloud_to_scan.py',
@@ -33,7 +38,7 @@ def generate_launch_description():
         output='screen',
     )
 
-    # 2. slam_toolbox — Lifecycle 节点
+    # 2. slam_toolbox
     slam_node = LifecycleNode(
         package='slam_toolbox',
         executable='async_slam_toolbox_node',
@@ -65,9 +70,4 @@ def generate_launch_description():
         ),
     )
 
-    return LaunchDescription([
-        pcl_node,
-        slam_node,
-        configure_event,
-        activate_event,
-    ])
+    return LaunchDescription([pcl_node, slam_node, configure_event, activate_event])

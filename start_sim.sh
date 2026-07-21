@@ -8,8 +8,14 @@ source /opt/ros/jazzy/setup.bash
 source $WS/install/setup.bash 2>/dev/null || true
 
 echo "清理旧进程..."
-pkill -f "gz sim|ros_gz_bridge|fastlio_mapping|multi_image_view|drive_control|camera_info_publisher|yolo_detector|lidar_camera_fusion|smart_navigator|simple_navigator|explore_coordinator|auto_explorer|pointcloud_to_laserscan|slam_toolbox" 2>/dev/null || true
+pkill -f "gz sim|ros_gz_bridge|fastlio_mapping|multi_image_view|drive_control|camera_info_publisher|yolo_detector|lidar_camera_fusion|smart_navigator|simple_navigator|explore_coordinator|auto_explorer|pointcloud_to_laserscan|slam_toolbox|cloud_to_scan" 2>/dev/null || true
 sleep 2
+
+# 清理 DDS 共享内存残留 (消除 RTPS_TRANSPORT_SHM 错误)
+rm -rf /dev/shm/fastrtps_* /dev/shm/fastdds_* 2>/dev/null || true
+
+# 清除无效的 FASTRTPS 配置 (消除 XML parser 错误)
+unset FASTRTPS_DEFAULT_PROFILES_FILE
 
 # ── 窗口 2: 三合一图像 ──
 gnome-terminal --title="Vision" -- bash -c "

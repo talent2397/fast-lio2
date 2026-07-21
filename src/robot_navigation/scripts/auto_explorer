@@ -9,8 +9,11 @@ from scipy import ndimage
 import rclpy
 
 FULL_CIRCLE = 2 * math.pi; SPIN_TIMEOUT = 40.0
-MAX_V = 0.8; MAX_W = 1.5; MAX_ACCEL = 1.5
-REACT_TIME = 0.3; GOAL_DIST = 2.0; SPIN_SPD = 0.8
+MAX_V = 0.8; MAX_W = 1.5
+BRAKE_START = 3.5   # 开始减速距离 (m)
+BRAKE_STOP  = 1.0   # 完全停止距离 (m)
+BACKUP_DIST = 0.5   # 后退触发距离 (m)
+GOAL_DIST = 2.0; SPIN_SPD = 0.8
 
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -43,6 +46,8 @@ class AutoExplorer(Node):
         self._panic_phase2 = False
         self._panic_escape_dir = 0
         self._panic_heading = None
+        self._last_v = 0.0  # 诊断用
+        self._diag_t = 0.0; self._diag_n = 0
         self._panic_dir_set_t = 0.0
         self._prev_state = None
 
@@ -68,7 +73,19 @@ class AutoExplorer(Node):
     def _map(self, m):
         self.map_info = m.info
         self.map = np.array(m.data, dtype=np.int8).reshape(m.info.height, m.info.width)
-    def _scan(self, m): self.scan = m.ranges
+    def _scan(self, m):
+        self.scan = m.ranges
+        self._diag_n += 1
+        t = time.time()
+        if t - self._diag_t > 3.0 and len(m.ranges) > 100:
+            self._diag_t = t
+            n = len(m.ranges); q = n // 8; mid = n // 2
+            def _min(lo, hi):
+                vals = [m.ranges[i % n] for i in range(lo, hi) if 0.15 < m.ranges[i % n] < 30]
+                return f'{min(vals):.1f}m' if vals else '---'
+            self.get_logger().info(
+                f'[SCAN] F={_min(mid-q,mid+q)} L={_min(mid+q//2,mid+3*q//2)} '
+                f'R={_min(mid-3*q//2,mid-q//2)} ({self._diag_n}msgs)')
     def _tgt(self, m): self.fusion_tgt = m
     def _det(self, m):
         if m.detections: self.last_det = self.get_clock().now()
@@ -120,34 +137,64 @@ class AutoExplorer(Node):
                 best_len = length; best_ang = ang
         return best_ang if best_len > 1.0 else None
 
-    # ═══ scan safe speed (正常导航用) ═══
-    def _safe_linear(self, front_dist):
-        available = max(0, front_dist - 0.25 - REACT_TIME*0.5)
-        return max(0, min(MAX_V, math.sqrt(2*MAX_ACCEL*available) if available>0 else 0))
+    # ═══ 扫描→安全速度 (5m线性减速, 1.5m停, 0.8m退) ═══
     def _scan_safe(self, heading_world):
-        if not self.scan or len(self.scan)==0: return 0.0, 0.0
+        """根据目标朝向和 /scan 数据, 返回 (linear_safe, angular_guide)"""
+        if not self.scan or len(self.scan) == 0:
+            return 0.0, 0.0
+
         n = len(self.scan)
         rel = heading_world - self.yaw
         rel = math.atan2(math.sin(rel), math.cos(rel))
-        cone = n//12; mid = int((rel+math.pi)/(2*math.pi)*n)%n
+
+        # 前方锥 (±15°, 30° wide)
+        cone = max(1, n // 24)
+        mid = int((rel + math.pi) / (2 * math.pi) * n) % n
         front_min = 99.0
-        for i in range(mid-cone, mid+cone+1):
-            v = self.scan[i%n]
-            if 0.15<v<99 and not math.isnan(v) and not math.isinf(v): front_min=min(front_min,v)
-        wide = n//7; wide_min=99.0; left_min=99.0; right_min=99.0
-        for i in range(mid-wide, mid+wide+1):
-            idx=i%n; v=self.scan[idx]
-            if not (0.15<v<99): continue
+        for i in range(mid - cone, mid + cone + 1):
+            v = self.scan[i % n]
+            if 0.15 < v < 99 and not math.isnan(v) and not math.isinf(v):
+                front_min = min(front_min, v)
+
+        # 宽锥 (±45°): 检测侧面障碍
+        wide = max(1, n // 8)
+        left_min, right_min = 99.0, 99.0
+        for i in range(mid - wide, mid + wide + 1):
+            idx = i % n
+            v = self.scan[idx]
+            if not (0.15 < v < 99): continue
             if math.isnan(v) or math.isinf(v): continue
-            wide_min=min(wide_min,v)
-            if idx>mid: left_min=min(left_min,v)
-            else: right_min=min(right_min,v)
-        if front_min<0.4: return -0.25, (1.0 if left_min>right_min else -1.0)
-        sv = self._safe_linear(front_min)
-        if wide_min<1.0: sv=min(sv,0.25); ang=0.8*(1.0 if left_min>right_min else -1.0)
-        elif wide_min<2.5: sv=min(sv,0.5); ang=0.3*(1.0 if left_min>right_min else -1.0)
-        else: ang=0.0
-        return sv, ang
+            if idx > mid:
+                left_min = min(left_min, v)
+            else:
+                right_min = min(right_min, v)
+
+        # ── 线速度: 线性减速 5m→1.5m, 0.8m 后退 ──
+        if front_min < BACKUP_DIST:
+            lin = -0.3  # 后退!
+            ang = 1.0 if left_min > right_min else -1.0
+        elif front_min < BRAKE_STOP:
+            lin = 0.0   # 停
+            ang = 0.6 if left_min > right_min else -0.6
+        elif front_min < BRAKE_START:
+            # [1.5, 5.0] → [0, MAX_V]
+            lin = MAX_V * (front_min - BRAKE_STOP) / (BRAKE_START - BRAKE_STOP)
+            # 侧面有障碍时额外减速
+            side_min = min(left_min, right_min)
+            if side_min < 2.0:
+                lin *= max(0.3, (side_min - 0.5) / 1.5)
+            ang = 0.0
+        else:
+            lin = MAX_V
+            ang = 0.0
+
+        # 偏转引导: 只在需要避开时触发
+        if left_min < 1.0 and right_min > 2.0:
+            ang = -0.5  # 左近右开 → 右转
+        elif right_min < 1.0 and left_min > 2.0:
+            ang = 0.5   # 右近左开 → 左转
+
+        return lin, ang
 
     # ═══ A* / 前沿 / LOS ═══
     def _astar(self, sx, sy, gx, gy):
@@ -333,6 +380,16 @@ class AutoExplorer(Node):
         # ═══════════════════════════════════════
         # 正常状态机
         # ═══════════════════════════════════════
+        def _apply_scan_safe(c, heading, vw):
+            """统一的速度应用: scan安全值 + heading 纠正 (只在前进时纠正)"""
+            v, w = vw
+            err = heading - self.yaw
+            err = math.atan2(math.sin(err), math.cos(err))
+            c.linear.x = v
+            if v > 0.05:
+                c.angular.z = max(-MAX_W, min(MAX_W, w + 1.5 * err))
+            else:
+                c.angular.z = w  # 停/退时信任scan的angular引导
 
         # ── SPIN_WAIT ──
         if self.state == 'SPIN_WAIT':
@@ -378,9 +435,7 @@ class AutoExplorer(Node):
             los = self._los_lookahead()
             if los: gx, gy = los
             heading = math.atan2(gy-self.pose.y, gx-self.pose.x)
-            v, w = self._scan_safe(heading)
-            err = heading - self.yaw; err = math.atan2(math.sin(err), math.cos(err))
-            c.linear.x = v; c.angular.z = max(-MAX_W, min(MAX_W, w + 1.5*err))
+            _apply_scan_safe(c, heading, self._scan_safe(heading))
             self.pub.publish(c); return
 
         # ── REACHED ──
@@ -394,9 +449,7 @@ class AutoExplorer(Node):
             if los:
                 gx, gy = los
                 heading = math.atan2(gy-self.pose.y, gx-self.pose.x)
-                v, w = self._scan_safe(heading)
-                err = heading - self.yaw; err = math.atan2(math.sin(err), math.cos(err))
-                c.linear.x = v; c.angular.z = max(-MAX_W, min(MAX_W, w + 1.5*err))
+                _apply_scan_safe(c, heading, self._scan_safe(heading))
                 dtg = math.hypot(self._path_target[0]-self.pose.x, self._path_target[1]-self.pose.y)
                 dlos = math.hypot(gx - self._path_target[0], gy - self._path_target[1])
                 if (dtg < 1.0 or (dtg < 2.0 and dlos < 0.5)) and (now - self._fplan_t) > 1.5:
