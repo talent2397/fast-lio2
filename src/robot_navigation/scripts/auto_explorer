@@ -42,8 +42,9 @@ class AutoExplorer(Node):
         self._odom_n = 0
         self._back_t = 0.0; self._back_dir = 0.8; self._back_dir_locked = False
         self._post_brake_t = 0.0   # 硬刹车退出后强制转弯计时
-        self._brake_count = 0      # 连续硬刹车计数 (2次=死角loop)
-        self._brake_pos = None     # 上次硬刹车位置, 用于禁区标记
+        self._brake_count = 0      # 连续硬刹车计数
+        self._brake_pos = None     # 上次硬刹车位置
+        self._stuck_escalate = 0   # stuck 升级计数, 越高越激进出逃
 
         # 直接订阅 /scan (cloud_to_scan已做好3D→2D转换, 720rays robot/base_link帧)
         self.create_subscription(LaserScan, '/scan', self._scan, qos_profile_sensor_data)
@@ -278,8 +279,9 @@ class AutoExplorer(Node):
                       if 0.5 < self.scan_ranges[i%n] < 30]
                 fmin = fv[0] if fv else 99.0
             self.get_logger().info(
-                f'[DIAG] F_min={fmin:.2f}m state={self.state} '
-                f'odom={self._odom_n} back={self._back_t:.1f} pt={self._post_brake_t:.1f}')
+                f'[DIAG] F_min={fmin:.2f}m {self.state} '
+                f'o={self._odom_n} bk={self._back_t:.1f} pt={self._post_brake_t:.1f} '
+                f'sk={self._stuck:.1f} e={self._stuck_escalate}')
 
         # ── 最高优先级: 硬刹车 (SPIN_WAIT期间不触发) ──
         if self.state != 'SPIN_WAIT' and self._back_t > 0:
@@ -291,18 +293,20 @@ class AutoExplorer(Node):
         if self.state != 'SPIN_WAIT' and self._hard_brake():
             self.pub.publish(c); return
 
-        # ── 硬刹车后原地转弯 (避免回头撞同一障碍) ──
+        # ── 逃脱转弯: 转+前进 (不清_vst，防回到同一个前沿) ──
         if self._post_brake_t > 0:
+            was_full = self._post_brake_t
             self._post_brake_t -= 0.05
-            self.path = []; self._path_target = None; self._vst.clear()
-            # loop: 连续刹车≥2 → 反向转 + 转更久
-            if self._brake_count >= 2:
-                c.linear.x = -0.2
-                c.angular.z = -self._back_dir * 1.2  # 反向转180°
-                if self._post_brake_t < 0.1:
-                    self._brake_count = 0  # U-turn完成, 重置
+            self.path = []; self._path_target = None
+
+            if self._post_brake_t > was_full * 0.5:
+                c.linear.x = -0.15; c.angular.z = self._back_dir * 1.2
             else:
-                c.linear.x = -0.1; c.angular.z = self._back_dir * 1.0
+                c.linear.x = 0.35; c.angular.z = self._back_dir * 0.4
+
+            if self._post_brake_t <= 0 and self.pose is not None:
+                mk = (round(self.pose.x/3), round(self.pose.y/3))
+                self._vst.add(mk); self._brake_count = 0
             self.pub.publish(c); return
 
         # ── 目标检测 (优先级最高, SPIN_WAIT也会被中断) ──
@@ -370,16 +374,23 @@ class AutoExplorer(Node):
 
         # ── EXPLORE ──
         if self.path and self._path_target:
-            los = self._los_lookahead()
-            gx_tgt, gy_tgt = los if los else self._path_target
-            v, w = self._potential_field(gx_tgt, gy_tgt)
-            c.linear.x = v; c.angular.z = w
-            dtg = math.hypot(self._path_target[0]-self.pose.x, self._path_target[1]-self.pose.y)
-            if dtg < 1.0 and (now - self._fplan_t) > 2.0:
+            # 路径走不通 (卡住>5s) → 放弃路径
+            if self._stuck > 5.0 or (now - self._fplan_t) > 20.0:
+                self.get_logger().warn(f'路径不通, 放弃 (stuck={self._stuck:.1f})')
                 self.path = []; self._path_target = None
                 if self._last_goal: self._vst.add(self._last_goal)
-                self.get_logger().info(f'到达前沿 #{self._cnt}'); self._stuck = 0.0
-                self._brake_count = 0  # 正常到达, 重置刹车计数
+                self._stuck = 0.0
+            else:
+                los = self._los_lookahead()
+                gx_tgt, gy_tgt = los if los else self._path_target
+                v, w = self._potential_field(gx_tgt, gy_tgt)
+                c.linear.x = v; c.angular.z = w
+                dtg = math.hypot(self._path_target[0]-self.pose.x, self._path_target[1]-self.pose.y)
+                if dtg < 1.0 and (now - self._fplan_t) > 2.0:
+                    self.path = []; self._path_target = None
+                    if self._last_goal: self._vst.add(self._last_goal)
+                    self.get_logger().info(f'到达前沿 #{self._cnt}')
+                    self._stuck = 0.0; self._brake_count = 0; self._stuck_escalate = 0
             self.pub.publish(c); return
 
         los_recent = (now - self._los_fail_t) < 1.0
@@ -409,10 +420,22 @@ class AutoExplorer(Node):
                 self._no_ft_count += 1
 
         if self._stuck > 5.0:
-            self.get_logger().warn(f'stuck={self._stuck:.1f}s → U-turn')
-            c.linear.x = -0.2; c.angular.z = 1.2
-            self._stuck = 0.0; self.path = []
-            self._no_ft_count = 0; self._post_brake_t = 3.0
+            self._stuck_escalate += 1
+            esc = self._stuck_escalate
+            self.get_logger().warn(f'stuck={self._stuck:.1f}s esc={esc} → escape')
+            self._stuck = 0.0; self.path = []; self._no_ft_count = 0
+
+            if esc >= 3:
+                # 三次卡死 → 大撤退: 清空一切, 朝身后方向冲
+                self._vst.clear(); self._stuck_escalate = 0
+                self._post_brake_t = 5.0  # 5s全速后退+转向
+                self._back_dir = 1.0 if np.random.random() > 0.5 else -1.0
+                self.get_logger().error('STUCKx3! Full retreat!')
+            elif esc >= 2:
+                self._post_brake_t = 3.0  # 转+后
+                self._back_dir = 1.0 if np.random.random() > 0.5 else -1.0
+            else:
+                self._post_brake_t = 3.0
             self.pub.publish(c); return
 
         if self._no_ft_count > 5:
