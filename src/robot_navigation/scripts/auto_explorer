@@ -44,7 +44,9 @@ class AutoExplorer(Node):
         self._post_brake_t = 0.0   # 硬刹车退出后强制转弯计时
         self._brake_count = 0      # 连续硬刹车计数
         self._brake_pos = None     # 上次硬刹车位置
-        self._stuck_escalate = 0   # stuck 升级计数, 越高越激进出逃
+        self._stuck_escalate = 0   # stuck 升级计数
+        self._bias_angle = None    # stuck后禁止朝此方向推 (world rad)
+        self._spin_scan_t = 0.0    # spin-scan 累计时间
 
         # 直接订阅 /scan (cloud_to_scan已做好3D→2D转换, 720rays robot/base_link帧)
         self.create_subscription(LaserScan, '/scan', self._scan, qos_profile_sensor_data)
@@ -391,6 +393,7 @@ class AutoExplorer(Node):
                     if self._last_goal: self._vst.add(self._last_goal)
                     self.get_logger().info(f'到达前沿 #{self._cnt}')
                     self._stuck = 0.0; self._brake_count = 0; self._stuck_escalate = 0
+                    self._bias_angle = None  # 成功到达, 解锁方向限制
             self.pub.publish(c); return
 
         los_recent = (now - self._los_fail_t) < 1.0
@@ -412,6 +415,7 @@ class AutoExplorer(Node):
                     if rw:
                         self.path = rw; self._path_target = (gx, gy)
                         self._cnt += 1; self._stuck = 0.0; self._no_ft_count = 0
+                        self._spin_scan_t = 0.0
                         self._fplan_t = now; self._los_fail_t = 0.0
                         self.get_logger().info(f'→({gx:.1f},{gy:.1f}) d={math.hypot(gx-self.pose.x,gy-self.pose.y):.1f}m sz={size} #{self._cnt}')
                         self.pub.publish(c); return
@@ -423,24 +427,16 @@ class AutoExplorer(Node):
             self._stuck_escalate += 1
             esc = self._stuck_escalate
             self.get_logger().warn(f'stuck={self._stuck:.1f}s esc={esc} → escape')
-            self._stuck = 0.0; self.path = []; self._no_ft_count = 0
+            self._bias_angle = self.yaw
+            self._stuck = 0.0; self.path = []; self._no_ft_count = 6  # 立即进入no-ft
 
             if esc >= 3:
-                # 死循环 → 清空visited, 在身后方向找最安全前沿, 长撤退
-                self._vst.clear(); self._stuck_escalate = 0
-                self._post_brake_t = 8.0  # 8s长撤退
-                # 找身后半球最安全方向
-                if self.scan_ranges is not None and self._scan_valid > 5:
-                    n = len(self.scan_ranges)
-                    back_start = n//4; back_end = 3*n//4  # 身后180°
-                    best_i, best_d = n//2, 0
-                    for i in range(back_start, back_end):
-                        d = self.scan_ranges[i%n]
-                        if 0.5 < d < 30 and not math.isinf(d) and d > best_d:
-                            best_d = d; best_i = i%n
-                    self._back_dir = 1.0 if best_i > n//2 else -1.0
-                else:
-                    self._back_dir = 1.0 if np.random.random() > 0.5 else -1.0
+                if self.pose is not None:
+                    mk = (round(self.pose.x/3), round(self.pose.y/3))
+                    self._vst.add(mk)
+                self._stuck_escalate = 0
+                self._post_brake_t = 8.0
+                self._back_dir = 1.0 if np.random.random() > 0.5 else -1.0
                 self.get_logger().error('STUCKx3! 大撤退')
             elif esc >= 2:
                 self._post_brake_t = 3.0
@@ -449,20 +445,42 @@ class AutoExplorer(Node):
                 self._post_brake_t = 3.0
             self.pub.publish(c); return
 
+        # 无前沿: 短时推, 长时旋转扫描建图
         if self._no_ft_count > 5:
             if now - self._log_t > 3.0:
                 self._log_t = now
-                self.get_logger().info(f'无前沿x{self._no_ft_count} → 朝前推')
-            # 前半球找最开阔方向 (±120°)
+                mode = 'push' if self._no_ft_count < 20 else 'spin-scan'
+                self.get_logger().info(f'无前沿x{self._no_ft_count} → {mode}')
+
+            if self._no_ft_count >= 20:
+                # 盲推太久了 → 原地旋转建图
+                c.linear.x = 0.0; c.angular.z = 0.6
+                # 每10s清_vst, 让新前沿出现
+                self._spin_scan_t += 0.05
+                if self._spin_scan_t > 10.0:
+                    self._vst.clear(); self._spin_scan_t = 0.0
+                    self.get_logger().info('spin-scan: _vst cleared')
+                self.pub.publish(c); return
+
+            # 找最开阔方向, 但避开 _bias_angle
             if self.scan_ranges is not None and self._scan_valid > 5:
                 n = len(self.scan_ranges); mid = n//2
-                fwd_range = 2*n//3  # ±120°
-                best_i, best_d = mid, 0
+                fwd_range = 2*n//3
+                best_i, best_score = mid, -9.0
                 for i in range(mid - fwd_range//2, mid + fwd_range//2):
                     d = self.scan_ranges[i%n]
-                    if 0.5 < d < 30 and not math.isinf(d) and d > best_d:
-                        best_d = d; best_i = i%n
-                best_angle = self.yaw + (-math.pi + best_i*2*math.pi/n)
+                    if not (0.5 < d < 30): d = 0.5
+                    if math.isinf(d): d = 0.5
+                    w_angle = -math.pi + (i%n)*2.0*math.pi/n
+                    bias_penalty = 0.0
+                    if self._bias_angle is not None:
+                        err = abs(math.atan2(math.sin(w_angle - self._bias_angle),
+                                             math.cos(w_angle - self._bias_angle)))
+                        bias_penalty = max(0, 1.0 - err/math.pi) * 10.0
+                    score = d - bias_penalty
+                    if score > best_score:
+                        best_score = score; best_i = i%n
+                best_angle = self.yaw + (-math.pi + best_i*2.0*math.pi/n)
                 gx_tgt = self.pose.x + 3.0*math.cos(best_angle)
                 gy_tgt = self.pose.y + 3.0*math.sin(best_angle)
             else:
@@ -471,9 +489,15 @@ class AutoExplorer(Node):
             v, w = self._potential_field(gx_tgt, gy_tgt)
             c.linear.x = v; c.angular.z = w; self.pub.publish(c); return
 
-        # 兜底: 朝前进方向推3m
-        gx_tgt = self.pose.x + 3.0*math.cos(self.yaw)
-        gy_tgt = self.pose.y + 3.0*math.sin(self.yaw)
+        # 兜底: 避_bias_angle推
+        fwd_angle = self.yaw
+        if self._bias_angle is not None:
+            err = abs(math.atan2(math.sin(fwd_angle - self._bias_angle),
+                                 math.cos(fwd_angle - self._bias_angle)))
+            if err < 0.5:  # 前方<30°就是stuck方向 → 朝侧面推
+                fwd_angle = self.yaw + (self._back_dir * math.pi/2)
+        gx_tgt = self.pose.x + 3.0*math.cos(fwd_angle)
+        gy_tgt = self.pose.y + 3.0*math.sin(fwd_angle)
         v, w = self._potential_field(gx_tgt, gy_tgt)
         c.linear.x = v; c.angular.z = w
         self.pub.publish(c)
