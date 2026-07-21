@@ -111,43 +111,58 @@ class AutoExplorer(Node):
         if self.map is None: return False
         return int(np.count_nonzero(self.map==0)) > self.map.size*0.01
 
-    # ═══ 硬刹车: 锁死转向方向, 后退直到开阔 ═══
+    # ═══ 硬刹车: 前半球有3个点<0.5m就后退 ═══
     def _hard_brake(self):
         if self.scan_ranges is None or self._scan_valid < 5:
             return False
-        n = len(self.scan_ranges); cone = max(1, n//10); mid = n//2
-        hits = [self.scan_ranges[i%n] for i in range(mid-cone, mid+cone+1)
-                if 0.2 < self.scan_ranges[i%n] < 0.5
-                and not math.isinf(self.scan_ranges[i%n])]
-        if len(hits) >= 3:
-            mf = min(hits)
-            if mf > 3.0:
-                self._back_dir_locked = False; return False
-            # 只在首次触发时选方向, 之后锁死
+        n = len(self.scan_ranges); mid = n//2
+        # 前方窄锥一次扫描, 与 DIAG 保持一致 (±18° aprox)
+        cone = n // 10
+        # 找前锥最小距离
+        fv = [self.scan_ranges[i%n] for i in range(mid-cone, mid+cone+1)
+              if 0.2 < self.scan_ranges[i%n] < 30
+              and not math.isinf(self.scan_ranges[i%n])]
+        front_min = min(fv) if fv else 99.0
+        # 统计<0.5m的点数
+        hits = sum(1 for v in fv if v < 0.5)
+
+        if hits >= 3:
+            # 前方<0.5m → 锁死后退方向, 向开阔侧退
             if not self._back_dir_locked:
                 q = n//4
-                r_sum = sum(d for d in [self.scan_ranges[i%n] for i in range(mid-q, mid)]
-                           if 0.3<d<30 and not math.isinf(d))
-                l_sum = sum(d for d in [self.scan_ranges[i%n] for i in range(mid, mid+q)]
-                           if 0.3<d<30 and not math.isinf(d))
-                self._back_dir = 1.0 if l_sum > r_sum else -1.0
+                l = min((v for v in [self.scan_ranges[i%n] for i in range(mid, mid+q)]
+                        if 0.3<v<30), default=99.0)
+                r = min((v for v in [self.scan_ranges[i%n] for i in range(mid-q, mid)]
+                        if 0.3<v<30), default=99.0)
+                self._back_dir = 1.0 if l > r else -1.0
                 self._back_dir_locked = True
-                self.get_logger().warn(f'HARD BRAKE! F={mf:.2f}m → {"LEFT" if self._back_dir>0 else "RIGHT"}')
-            self._back_t = 0.5; self.path = []; self._path_target = None; self._stuck = 0.0
+                self.get_logger().warn(f'HARD BRAKE! F={front_min:.2f}m')
+            self._back_t = 0.8; self.path = []; self._stuck = 0.0
             return True
-        self._back_dir_locked = False; return False
 
-    # ═══ 势场 ═══
+        if front_min > 3.0:
+            # 前方 > 3m → 解锁
+            self._back_dir_locked = False; self._back_t = 0.0; return False
+
+        # 0.5 < front_min < 3.0: 不后退
+        return False
+
+        # ═══ 势场 ═══
     def _potential_field(self, goal_wx, goal_wy):
         if self.scan_ranges is None or self._scan_valid < 5:
             return 0.0, 0.0
         n = len(self.scan_ranges); fx, fy = 0.0, 0.0
-        step = max(1, n // 360)  # ~360 rays for balance
+        step = max(1, n // 360)
+        mid = n // 2
         for i in range(0, n, step):
             d = self.scan_ranges[i]
             if not (0.3 < d < 30): continue
             if math.isinf(d): continue
+            # 只排斥前方半球 (±135°), 背后无视
             angle = -math.pi + i*(2.0*math.pi/n)
+            rel_to_front = math.atan2(math.sin(angle), math.cos(angle))
+            if abs(rel_to_front) > math.pi * 0.75:  # >135° = 背后
+                continue
             ca, sa = math.cos(angle), math.sin(angle)
             if d < D_BACK: k = K_REP * 8.0
             elif d < D_SAFE: k = K_REP*(D_SAFE/d)**2
@@ -405,37 +420,28 @@ class AutoExplorer(Node):
         if self._no_ft_count > 5:
             if now - self._log_t > 3.0:
                 self._log_t = now
-                self.get_logger().info(f'无前沿x{self._no_ft_count}')
+                self.get_logger().info(f'无前沿x{self._no_ft_count} → 朝前推')
+            # 前半球找最开阔方向 (±120°)
             if self.scan_ranges is not None and self._scan_valid > 5:
-                n = len(self.scan_ranges)
-                best_i, best_d = 0, 0
-                for i in range(0, n, 5):
-                    d = self.scan_ranges[i]
+                n = len(self.scan_ranges); mid = n//2
+                fwd_range = 2*n//3  # ±120°
+                best_i, best_d = mid, 0
+                for i in range(mid - fwd_range//2, mid + fwd_range//2):
+                    d = self.scan_ranges[i%n]
                     if 0.5 < d < 30 and not math.isinf(d) and d > best_d:
-                        best_d = d; best_i = i
-                best_angle = self.yaw + (-math.pi + best_i*2*math.pi/n) if best_d > 0 else self.yaw
+                        best_d = d; best_i = i%n
+                best_angle = self.yaw + (-math.pi + best_i*2*math.pi/n)
                 gx_tgt = self.pose.x + 3.0*math.cos(best_angle)
                 gy_tgt = self.pose.y + 3.0*math.sin(best_angle)
             else:
-                gx_tgt = self.pose.x + math.cos(self.yaw)
-                gy_tgt = self.pose.y + math.sin(self.yaw)
+                gx_tgt = self.pose.x + 3.0*math.cos(self.yaw)
+                gy_tgt = self.pose.y + 3.0*math.sin(self.yaw)
             v, w = self._potential_field(gx_tgt, gy_tgt)
             c.linear.x = v; c.angular.z = w; self.pub.publish(c); return
 
-        # 兜底: 朝最开阔方向推
-        if self.scan_ranges is not None and self._scan_valid > 5:
-            n = len(self.scan_ranges)
-            best_i, best_d = 0, 0
-            for i in range(0, n, 5):
-                d = self.scan_ranges[i]
-                if 0.5 < d < 30 and not math.isinf(d) and d > best_d:
-                    best_d = d; best_i = i
-            best_angle = self.yaw + (-math.pi + best_i*2*math.pi/n) if best_d > 0 else self.yaw
-            gx_tgt = self.pose.x + 2.0*math.cos(best_angle)
-            gy_tgt = self.pose.y + 2.0*math.sin(best_angle)
-        else:
-            gx_tgt = self.pose.x + math.cos(self.yaw)
-            gy_tgt = self.pose.y + math.sin(self.yaw)
+        # 兜底: 朝前进方向推3m
+        gx_tgt = self.pose.x + 3.0*math.cos(self.yaw)
+        gy_tgt = self.pose.y + 3.0*math.sin(self.yaw)
         v, w = self._potential_field(gx_tgt, gy_tgt)
         c.linear.x = v; c.angular.z = w
         self.pub.publish(c)
