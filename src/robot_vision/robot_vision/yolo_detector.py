@@ -31,7 +31,8 @@ except ImportError:
     pass
 
 # Target definitions
-TARGET_CLASSES_YOLO = {32: 'sports ball', 56: 'chair', 0: 'person'}
+TARGET_CLASSES_YOLO = {32: 'sports ball', 56: 'chair'}
+YOLO_CONF_THRESH = 0.5  # 置信度阈值, <0.5忽略
 
 # HSV ranges for RED ball (双阈值融合, 红色在 H 两端: 0-10 & 160-180)
 # S_min=100 V_min=70: 过滤低饱和度/低亮度像素, 大幅减少误检
@@ -123,36 +124,19 @@ class YoloDetector(Node):
 
         annotated = rgb.copy()
 
-        # --- HSV RED BALL DETECTION (always run) ---
+        # --- HSV RED BALL (visual only, 不触发CHASE) ---
         hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
         red_dets, red_mask = self._detect_red_ball(hsv)
 
         for (cx, cy, bw, bh) in red_dets:
+            # 仅可视化, 不发布detection (HSV误检率太高)
             x1, y1 = int(cx - bw/2), int(cy - bh/2)
             x2, y2 = int(cx + bw/2), int(cy + bh/2)
-
-            # Draw on annotated image
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), (255, 0, 0), 2)
-            cv2.putText(annotated, 'RED BALL', (x1, max(y1-5, 10)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 0, 255), 2)
+            cv2.putText(annotated, 'HSV(ignored)', (x1, max(y1-5, 10)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
             cv2.drawMarker(annotated, (int(cx), int(cy)), (0, 255, 255),
-                           cv2.MARKER_CROSS, 20, 2)
-
-            # Build detection msg
-            det2d = Detection2D()
-            det2d.header = msg.header
-            obj = ObjectHypothesisWithPose()
-            obj.hypothesis.class_id = 'red_ball'
-            obj.hypothesis.score = 0.9   # HSV isn't probabilistic
-            det2d.results.append(obj)
-            bbox = BoundingBox2D()
-            bbox.center = Pose2D()
-            bbox.center.position.x = cx
-            bbox.center.position.y = cy
-            bbox.size_x = bw
-            bbox.size_y = bh
-            det2d.bbox = bbox
-            det_array.detections.append(det2d)
+                           cv2.MARKER_CROSS, 10, 1)
 
         # --- YOLO (if available) ---
         if self.yolo is not None:
@@ -165,6 +149,8 @@ class YoloDetector(Node):
                     cls_id = int(box.cls[0].item())
                     conf = float(box.conf[0].item())
                     if cls_id not in TARGET_CLASSES_YOLO:
+                        continue
+                    if conf < YOLO_CONF_THRESH:
                         continue
                     x1b, y1b, x2b, y2b = box.xyxy[0].tolist()
                     cxb = (x1b + x2b) / 2.0

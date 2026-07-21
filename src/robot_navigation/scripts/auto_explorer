@@ -8,7 +8,7 @@ from scipy import ndimage
 import rclpy
 
 FULL_CIRCLE = 2*math.pi; SPIN_TIMEOUT = 20.0
-MAX_V = 0.8; MAX_W = 1.5; GOAL_DIST = 2.0; SPIN_SPD = 0.8
+MAX_V = 0.6; MAX_W = 1.5; GOAL_DIST = 2.0; SPIN_SPD = 0.8
 
 K_REP = 1.5; K_ATT = 0.8; K_ANG = 2.0; D_SAFE = 2.5; D_BACK = 1.0
 W_GAIN = 2.0; W_DIST = 2.0; W_TURN = 1.5
@@ -217,7 +217,7 @@ class AutoExplorer(Node):
                         nr,nc=rr+dr,cc+dc
                         if (nr,nc) in fs and (nr,nc) not in vis:
                             vis.add((nr,nc)); q.append((nr,nc))
-            if len(cl)>=5: clusters.append(cl)
+            if len(cl)>=15: clusters.append(cl)
         return [(mc*r+ox+r/2, mr*r+oy+r/2, len(cl))
                 for cl in clusters
                 for mr in [sum(c[0] for c in cl)/len(cl)]
@@ -409,10 +409,10 @@ class AutoExplorer(Node):
                 self._no_ft_count += 1
 
         if self._stuck > 5.0:
-            self.get_logger().warn(f'stuck={self._stuck:.1f}s')
-            c.angular.z = 1.2
-            self._stuck = 0.0; self.path = []; self._vst.clear()
-            self._no_ft_count = 0; self._post_brake_t = 0.0
+            self.get_logger().warn(f'stuck={self._stuck:.1f}s → U-turn')
+            c.linear.x = -0.2; c.angular.z = 1.2
+            self._stuck = 0.0; self.path = []
+            self._no_ft_count = 0; self._post_brake_t = 3.0
             self.pub.publish(c); return
 
         if self._no_ft_count > 5:

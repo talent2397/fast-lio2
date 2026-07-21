@@ -31,8 +31,8 @@ class CloudToScan(Node):
         x = arr['x'].astype(np.float64); y = arr['y'].astype(np.float64)
         z = arr['z'].astype(np.float64)
 
-        # 高度: 地面z≈-0.58, z>-0.55保留障碍; z<2.5过滤天花板
-        hm = (z > -0.55) & (z < 2.5)
+        # 高度: 全部z∈[-0.65,-0.09]都在传感器下方, z>-0.65保留一切
+        hm = (z > -0.65) & (z < 2.5)
         if np.count_nonzero(hm) < 10: return
         x, y = x[hm], y[hm]
 
