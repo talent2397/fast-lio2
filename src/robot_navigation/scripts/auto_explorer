@@ -415,7 +415,7 @@ class AutoExplorer(Node):
                         self._fplan_t = now; self._los_fail_t = 0.0
                         self.get_logger().info(f'→({gx:.1f},{gy:.1f}) d={math.hypot(gx-self.pose.x,gy-self.pose.y):.1f}m sz={size} #{self._cnt}')
                         self.pub.publish(c); return
-                self._vst.clear()
+                # 所有前沿已访问 → 不重访, 走no-ft推新区域
             else:
                 self._no_ft_count += 1
 
@@ -426,13 +426,24 @@ class AutoExplorer(Node):
             self._stuck = 0.0; self.path = []; self._no_ft_count = 0
 
             if esc >= 3:
-                # 三次卡死 → 大撤退: 清空一切, 朝身后方向冲
+                # 死循环 → 清空visited, 在身后方向找最安全前沿, 长撤退
                 self._vst.clear(); self._stuck_escalate = 0
-                self._post_brake_t = 5.0  # 5s全速后退+转向
-                self._back_dir = 1.0 if np.random.random() > 0.5 else -1.0
-                self.get_logger().error('STUCKx3! Full retreat!')
+                self._post_brake_t = 8.0  # 8s长撤退
+                # 找身后半球最安全方向
+                if self.scan_ranges is not None and self._scan_valid > 5:
+                    n = len(self.scan_ranges)
+                    back_start = n//4; back_end = 3*n//4  # 身后180°
+                    best_i, best_d = n//2, 0
+                    for i in range(back_start, back_end):
+                        d = self.scan_ranges[i%n]
+                        if 0.5 < d < 30 and not math.isinf(d) and d > best_d:
+                            best_d = d; best_i = i%n
+                    self._back_dir = 1.0 if best_i > n//2 else -1.0
+                else:
+                    self._back_dir = 1.0 if np.random.random() > 0.5 else -1.0
+                self.get_logger().error('STUCKx3! 大撤退')
             elif esc >= 2:
-                self._post_brake_t = 3.0  # 转+后
+                self._post_brake_t = 3.0
                 self._back_dir = 1.0 if np.random.random() > 0.5 else -1.0
             else:
                 self._post_brake_t = 3.0
