@@ -75,7 +75,8 @@ class AutoExplorer(Node):
         self._stuck_straight_pending = 0.0  # v16: stuck退避后待直行时间
         self._post_brake_full = 0.0         # v17: 记录post_brake初始时长
         self._acquire_start = 0.0          # v17.1: ACQUIRE开始时间
-        self._acquire_cooldown_t = 0.0     # v17.2: ACQUIRE冷却计时(5s), 10s超时
+        self._acquire_cooldown_t = 0.0     # v17.2: ACQUIRE冷却计时(5s)
+        self._chase_start = 0.0            # v17.3: CHASE开始时间, 防冷启动误触发REACHED, 10s超时
 
         from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
         _map_qos = QoSProfile(depth=10, durability=DurabilityPolicy.TRANSIENT_LOCAL, reliability=ReliabilityPolicy.RELIABLE)
@@ -178,9 +179,9 @@ class AutoExplorer(Node):
 
         # Layer 1: 预减速 (仅窄锥 — 只有朝向障碍时才限速)
         if fm_narrow < PRE_BRAKE_DIST:
-            # 从hard_brake到pre_brake线性插值: 0.8m→v=0.25, 1.1m→v=0.4
-            speed_limit = 0.25 + 0.15 * (fm_narrow - HARD_BRAKE_DIST) / (PRE_BRAKE_DIST - HARD_BRAKE_DIST)
-            self._speed_limit = max(0.25, min(MAX_V, speed_limit))
+            # 开阔环境: 预减速从0.35起(v17原0.25), 0.8m→0.35, 1.1m→0.5
+            speed_limit = 0.35 + 0.15 * (fm_narrow - HARD_BRAKE_DIST) / (PRE_BRAKE_DIST - HARD_BRAKE_DIST)
+            self._speed_limit = max(0.30, min(MAX_V, speed_limit))
         else:
             self._speed_limit = MAX_V
         return False
@@ -427,8 +428,9 @@ class AutoExplorer(Node):
         if det_fresh and self.fusion_tgt is not None:
             if self.state not in ('CHASE', 'REACHED'):
                 self.state = 'CHASE'; self.path = []; self._path_target = None
-                self._acquire_start = 0.0  # 重置ACQUIRE计时
-                self._stuck = 0.0          # 重置stuck
+                self._acquire_start = 0.0
+                self._stuck = 0.0
+                self._chase_start = now      # v17.3: 记录CHASE开始时间
                 self.get_logger().info('→CHASE (target locked)')
         elif not det_fresh and self.state == 'CHASE':
             self.state = 'EXPLORE'; self.path = []; self._path_target = None
@@ -457,7 +459,11 @@ class AutoExplorer(Node):
                 c.linear.x = 0.0; c.angular.z = 0.35; self.pub.publish(c); return
             tp = self.fusion_tgt.pose.position
             d = math.hypot(tp.x-self.pose.x, tp.y-self.pose.y)
-            if d < GOAL_DIST:
+            # v17.3: 至少跟踪3s+目标距起点>3m才允许REACHED, 防fusion冷启动误触发
+            chase_dur = now - self._chase_start if self._chase_start > 0 else 0
+            init_dist = math.hypot(tp.x - (self._lp[0] if self._lp else tp.x),
+                                   tp.y - (self._lp[1] if self._lp else tp.y)) if self._lp else 0
+            if d < GOAL_DIST and chase_dur > 3.0:
                 self.state = 'REACHED'; self.pub.publish(Twist())
                 self.get_logger().info(f'到达! {d:.1f}m'); return
             ang_tgt = math.atan2(tp.y-self.pose.y, tp.x-self.pose.x)
@@ -531,11 +537,12 @@ class AutoExplorer(Node):
 
         # ── 前沿路径跟随 ──
         if self.path and self._path_target:
-            if self._stuck > 5.0 or (now - self._fplan_t) > 25.0:
+            if self._stuck > 3.0 or (now - self._fplan_t) > 20.0:
                 self.get_logger().warn(f'路径不通, 放弃 (stuck={self._stuck:.1f})')
                 self.path = []; self._path_target = None
                 if self._last_goal: self._vst.add(self._last_goal)
                 self._stuck = 0.0
+                self._fplan_t = 0.0    # v17.3: 强制立即重规划, 消除0.5s停顿
             else:
                 los = self._los_lookahead()
                 gx_tgt, gy_tgt = los if los else self._path_target

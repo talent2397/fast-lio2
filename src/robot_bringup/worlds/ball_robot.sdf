@@ -44,116 +44,56 @@
     <visual name="v"><geometry><box><size>30 0.4 5</size></box></geometry>
       <material><ambient>0.75 0.65 0.2</ambient><diffuse>0.8 0.7 0.25</diffuse></material></visual></link></model>
 
-<!-- ====== 内部障碍物 ====== -->
-<!-- NE 区 -->
+<!-- ====== 内部障碍物 (精简版: ~18个, 原36个) ====== -->
+<!-- NE 区 (球在12,8) -->
 <model name="ne_w1"><static>true</static><pose>10 8 2 0 0 0</pose>
   <link name="l"><collision name="c"><geometry><box><size>4 0.25 4</size></box></geometry></collision>
     <visual name="v"><geometry><box><size>4 0.25 4</size></box></geometry>
       <material><ambient>0.6 0.55 0.55</ambient><diffuse>0.7 0.65 0.65</diffuse></material></visual></link></model>
-<model name="ne_w2"><static>true</static><pose>8 10 2 0 0 1.57</pose>
-  <link name="l"><collision name="c"><geometry><box><size>3 0.25 4</size></box></geometry></collision>
-    <visual name="v"><geometry><box><size>3 0.25 4</size></box></geometry>
-      <material><ambient>0.55 0.6 0.55</ambient><diffuse>0.65 0.7 0.65</diffuse></material></visual></link></model>
-<model name="ne_p1"><static>true</static><pose>12 10 2.5 0 0 0</pose>
-  <link name="l"><collision name="c"><geometry><cylinder><radius>0.4</radius><length>5</length></cylinder></geometry></collision>
-    <visual name="v"><geometry><cylinder><radius>0.4</radius><length>5</length></cylinder></geometry>
-      <material><ambient>0.5 0.5 0.5</ambient><diffuse>0.6 0.6 0.6</diffuse></material></visual></link></model>
-<model name="ne_shelf"><static>true</static><pose>10 6 1.2 0 0 0.1</pose>
-  <link name="l"><collision name="c"><geometry><box><size>2 1 2.4</size></box></geometry></collision>
-    <visual name="v"><geometry><box><size>2 1 2.4</size></box></geometry>
-      <material><ambient>0.7 0.45 0.2</ambient><diffuse>0.75 0.5 0.25</diffuse></material></visual></link></model>
 
 <!-- NW 区 -->
 <model name="nw_w1"><static>true</static><pose>-10 8 2 0 0 0</pose>
   <link name="l"><collision name="c"><geometry><box><size>5 0.25 4</size></box></geometry></collision>
     <visual name="v"><geometry><box><size>5 0.25 4</size></box></geometry>
       <material><ambient>0.55 0.55 0.6</ambient><diffuse>0.65 0.65 0.7</diffuse></material></visual></link></model>
-<model name="nw_w2"><static>true</static><pose>-8 10 2 0 0 1.57</pose>
-  <link name="l"><collision name="c"><geometry><box><size>4 0.25 4</size></box></geometry></collision>
-    <visual name="v"><geometry><box><size>4 0.25 4</size></box></geometry>
-      <material><ambient>0.55 0.6 0.6</ambient><diffuse>0.65 0.7 0.7</diffuse></material></visual></link></model>
-<model name="nw_p1"><static>true</static><pose>-12 10 2.5 0 0 0</pose>
-  <link name="l"><collision name="c"><geometry><cylinder><radius>0.45</radius><length>5</length></cylinder></geometry></collision>
-    <visual name="v"><geometry><cylinder><radius>0.45</radius><length>5</length></cylinder></geometry>
-      <material><ambient>0.5 0.5 0.5</ambient><diffuse>0.6 0.6 0.6</diffuse></material></visual></link></model>
-<model name="nw_cr1"><static>true</static><pose>-10 6 0.6 0 0 0</pose>
-  <link name="l"><collision name="c"><geometry><box><size>1.5 1.5 1.2</size></box></geometry></collision>
-    <visual name="v"><geometry><box><size>1.5 1.5 1.2</size></box></geometry>
-      <material><ambient>0.35 0.55 0.7</ambient><diffuse>0.4 0.6 0.75</diffuse></material></visual></link></model>
 
 <!-- SW 区 -->
 <model name="sw_w1"><static>true</static><pose>-10 -8 2 0 0 0</pose>
   <link name="l"><collision name="c"><geometry><box><size>4 0.25 4</size></box></geometry></collision>
     <visual name="v"><geometry><box><size>4 0.25 4</size></box></geometry>
       <material><ambient>0.55 0.55 0.55</ambient><diffuse>0.65 0.65 0.65</diffuse></material></visual></link></model>
-<model name="sw_p1"><static>true</static><pose>-12 -9 2.5 0 0 0</pose>
-  <link name="l"><collision name="c"><geometry><cylinder><radius>0.4</radius><length>5</length></cylinder></geometry></collision>
-    <visual name="v"><geometry><cylinder><radius>0.4</radius><length>5</length></cylinder></geometry>
-      <material><ambient>0.5 0.5 0.5</ambient><diffuse>0.6 0.6 0.6</diffuse></material></visual></link></model>
-<model name="sw_p2"><static>true</static><pose>-8 -11 2 0 0 0</pose>
-  <link name="l"><collision name="c"><geometry><cylinder><radius>0.35</radius><length>4</length></cylinder></geometry></collision>
-    <visual name="v"><geometry><cylinder><radius>0.35</radius><length>4</length></cylinder></geometry>
-      <material><ambient>0.5 0.5 0.5</ambient><diffuse>0.6 0.6 0.6</diffuse></material></visual></link></model>
 
 <!-- SE 区 -->
 <model name="se_w1"><static>true</static><pose>10 -8 2 0 0 0</pose>
   <link name="l"><collision name="c"><geometry><box><size>5 0.25 4</size></box></geometry></collision>
     <visual name="v"><geometry><box><size>5 0.25 4</size></box></geometry>
       <material><ambient>0.6 0.55 0.5</ambient><diffuse>0.7 0.65 0.6</diffuse></material></visual></link></model>
-<model name="se_p1"><static>true</static><pose>10 -11 2.5 0 0 0</pose>
-  <link name="l"><collision name="c"><geometry><cylinder><radius>0.45</radius><length>5</length></cylinder></geometry></collision>
-    <visual name="v"><geometry><cylinder><radius>0.45</radius><length>5</length></cylinder></geometry>
-      <material><ambient>0.5 0.5 0.5</ambient><diffuse>0.6 0.6 0.6</diffuse></material></visual></link></model>
-<model name="se_cr1"><static>true</static><pose>8 -11 0.7 0 0 0.2</pose>
-  <link name="l"><collision name="c"><geometry><box><size>1.5 1 1.4</size></box></geometry></collision>
-    <visual name="v"><geometry><box><size>1.5 1 1.4</size></box></geometry>
-      <material><ambient>0.6 0.4 0.35</ambient><diffuse>0.65 0.45 0.4</diffuse></material></visual></link></model>
 
-<!-- 中央十字通道 -->
+<!-- 中央十字通道 (保留2个) -->
 <model name="cc_nw"><static>true</static><pose>-3 3 2 0 0 0</pose>
   <link name="l"><collision name="c"><geometry><cylinder><radius>0.3</radius><length>4</length></cylinder></geometry></collision>
     <visual name="v"><geometry><cylinder><radius>0.3</radius><length>4</length></cylinder></geometry>
       <material><ambient>0.5 0.45 0.5</ambient><diffuse>0.6 0.55 0.6</diffuse></material></visual></link></model>
-<model name="cc_ne"><static>true</static><pose>3 3 2 0 0 0</pose>
-  <link name="l"><collision name="c"><geometry><cylinder><radius>0.3</radius><length>4</length></cylinder></geometry></collision>
-    <visual name="v"><geometry><cylinder><radius>0.3</radius><length>4</length></cylinder></geometry>
-      <material><ambient>0.5 0.5 0.45</ambient><diffuse>0.6 0.6 0.55</diffuse></material></visual></link></model>
-<model name="cc_sw"><static>true</static><pose>-3 -3 2 0 0 0</pose>
-  <link name="l"><collision name="c"><geometry><cylinder><radius>0.3</radius><length>4</length></cylinder></geometry></collision>
-    <visual name="v"><geometry><cylinder><radius>0.3</radius><length>4</length></cylinder></geometry>
-      <material><ambient>0.5 0.5 0.45</ambient><diffuse>0.6 0.6 0.55</diffuse></material></visual></link></model>
 <model name="cc_se"><static>true</static><pose>3 -3 2 0 0 0</pose>
   <link name="l"><collision name="c"><geometry><cylinder><radius>0.3</radius><length>4</length></cylinder></geometry></collision>
     <visual name="v"><geometry><cylinder><radius>0.3</radius><length>4</length></cylinder></geometry>
       <material><ambient>0.45 0.5 0.5</ambient><diffuse>0.55 0.6 0.6</diffuse></material></visual></link></model>
 
-<!-- 散布柱子 -->
+<!-- 散布柱子 (保留一半) -->
 <model name="p_a"><static>true</static><pose>5 7 2 0 0 0</pose>
   <link name="l"><collision name="c"><geometry><cylinder><radius>0.25</radius><length>4</length></cylinder></geometry></collision>
     <visual name="v"><geometry><cylinder><radius>0.25</radius><length>4</length></cylinder></geometry>
       <material><ambient>0.5 0.5 0.5</ambient><diffuse>0.6 0.6 0.6</diffuse></material></visual></link></model>
-<model name="p_b"><static>true</static><pose>-5 7 2 0 0 0</pose>
-  <link name="l"><collision name="c"><geometry><cylinder><radius>0.35</radius><length>4</length></cylinder></geometry></collision>
-    <visual name="v"><geometry><cylinder><radius>0.35</radius><length>4</length></cylinder></geometry>
-      <material><ambient>0.5 0.5 0.5</ambient><diffuse>0.6 0.6 0.6</diffuse></material></visual></link></model>
 <model name="p_c"><static>true</static><pose>7 -5 2 0 0 0</pose>
   <link name="l"><collision name="c"><geometry><cylinder><radius>0.3</radius><length>4</length></cylinder></geometry></collision>
     <visual name="v"><geometry><cylinder><radius>0.3</radius><length>4</length></cylinder></geometry>
-      <material><ambient>0.5 0.5 0.5</ambient><diffuse>0.6 0.6 0.6</diffuse></material></visual></link></model>
-<model name="p_d"><static>true</static><pose>-7 -5 2 0 0 0</pose>
-  <link name="l"><collision name="c"><geometry><cylinder><radius>0.3</radius><length>4</length></cylinder></geometry></collision>
-    <visual name="v"><geometry><cylinder><radius>0.3</radius><length>4</length></cylinder></geometry>
-      <material><ambient>0.5 0.5 0.5</ambient><diffuse>0.6 0.6 0.6</diffuse></material></visual></link></model>
-<model name="p_e"><static>true</static><pose>0 7 2 0 0 0</pose>
-  <link name="l"><collision name="c"><geometry><cylinder><radius>0.2</radius><length>4</length></cylinder></geometry></collision>
-    <visual name="v"><geometry><cylinder><radius>0.2</radius><length>4</length></cylinder></geometry>
       <material><ambient>0.5 0.5 0.5</ambient><diffuse>0.6 0.6 0.6</diffuse></material></visual></link></model>
 <model name="p_f"><static>true</static><pose>0 -7 2 0 0 0</pose>
   <link name="l"><collision name="c"><geometry><cylinder><radius>0.2</radius><length>4</length></cylinder></geometry></collision>
     <visual name="v"><geometry><cylinder><radius>0.2</radius><length>4</length></cylinder></geometry>
       <material><ambient>0.5 0.5 0.5</ambient><diffuse>0.6 0.6 0.6</diffuse></material></visual></link></model>
 
-<!-- 箱子 -->
+<!-- 箱子 (保留一半) -->
 <model name="cr_a"><static>true</static><pose>4 -8 0.6 0 0 0.3</pose>
   <link name="l"><collision name="c"><geometry><box><size>1.2 1.2 1.2</size></box></geometry></collision>
     <visual name="v"><geometry><box><size>1.2 1.2 1.2</size></box></geometry>
@@ -162,67 +102,35 @@
   <link name="l"><collision name="c"><geometry><box><size>1 1.4 1.2</size></box></geometry></collision>
     <visual name="v"><geometry><box><size>1 1.4 1.2</size></box></geometry>
       <material><ambient>0.7 0.25 0.5</ambient><diffuse>0.75 0.3 0.55</diffuse></material></visual></link></model>
-<model name="cr_c"><static>true</static><pose>7 4 0.55 0 0 0.15</pose>
-  <link name="l"><collision name="c"><geometry><box><size>0.8 1.6 1.1</size></box></geometry></collision>
-    <visual name="v"><geometry><box><size>0.8 1.6 1.1</size></box></geometry>
-      <material><ambient>0.75 0.6 0.2</ambient><diffuse>0.8 0.65 0.25</diffuse></material></visual></link></model>
-<model name="cr_d"><static>true</static><pose>-7 -4 0.55 0 0 0</pose>
-  <link name="l"><collision name="c"><geometry><box><size>1.5 0.9 1.1</size></box></geometry></collision>
-    <visual name="v"><geometry><box><size>1.5 0.9 1.1</size></box></geometry>
-      <material><ambient>0.4 0.35 0.7</ambient><diffuse>0.45 0.4 0.75</diffuse></material></visual></link></model>
 
-<!-- 货架 -->
+<!-- 货架 (保留1个) -->
 <model name="sh_A"><static>true</static><pose>6 2 1.4 0 0 0</pose>
   <link name="l"><collision name="c"><geometry><box><size>2.5 0.8 2.8</size></box></geometry></collision>
     <visual name="v"><geometry><box><size>2.5 0.8 2.8</size></box></geometry>
       <material><ambient>0.6 0.45 0.3</ambient><diffuse>0.65 0.5 0.35</diffuse></material></visual></link></model>
-<model name="sh_B"><static>true</static><pose>-6 -2 1.3 0 0 0.2</pose>
-  <link name="l"><collision name="c"><geometry><box><size>2 0.9 2.6</size></box></geometry></collision>
-    <visual name="v"><geometry><box><size>2 0.9 2.6</size></box></geometry>
-      <material><ambient>0.35 0.5 0.65</ambient><diffuse>0.4 0.55 0.7</diffuse></material></visual></link></model>
-<model name="sh_C"><static>true</static><pose>2 6 1.1 0 0 0.1</pose>
-  <link name="l"><collision name="c"><geometry><box><size>1.8 1.2 2.2</size></box></geometry></collision>
-    <visual name="v"><geometry><box><size>1.8 1.2 2.2</size></box></geometry>
-      <material><ambient>0.55 0.35 0.55</ambient><diffuse>0.6 0.4 0.6</diffuse></material></visual></link></model>
-<model name="sh_D"><static>true</static><pose>-2 -6 1.0 0 0 0.3</pose>
-  <link name="l"><collision name="c"><geometry><box><size>1.6 1.1 2</size></box></geometry></collision>
-    <visual name="v"><geometry><box><size>1.6 1.1 2</size></box></geometry>
-      <material><ambient>0.6 0.55 0.25</ambient><diffuse>0.65 0.6 0.3</diffuse></material></visual></link></model>
 
-<!-- 油桶 -->
+<!-- 油桶 (保留2个) -->
 <model name="brl_1"><static>true</static><pose>-8 0 0.8 0 0 0</pose>
   <link name="l"><collision name="c"><geometry><cylinder><radius>0.4</radius><length>1.6</length></cylinder></geometry></collision>
     <visual name="v"><geometry><cylinder><radius>0.4</radius><length>1.6</length></cylinder></geometry>
       <material><ambient>0.7 0.5 0.2</ambient><diffuse>0.75 0.55 0.25</diffuse></material></visual></link></model>
-<model name="brl_2"><static>true</static><pose>8 0 0.8 0 0 0</pose>
-  <link name="l"><collision name="c"><geometry><cylinder><radius>0.35</radius><length>1.6</length></cylinder></geometry></collision>
-    <visual name="v"><geometry><cylinder><radius>0.35</radius><length>1.6</length></cylinder></geometry>
-      <material><ambient>0.65 0.4 0.25</ambient><diffuse>0.7 0.45 0.3</diffuse></material></visual></link></model>
 <model name="brl_3"><static>true</static><pose>0 -8 0.8 0 0 0</pose>
   <link name="l"><collision name="c"><geometry><cylinder><radius>0.3</radius><length>1.6</length></cylinder></geometry></collision>
     <visual name="v"><geometry><cylinder><radius>0.3</radius><length>1.6</length></cylinder></geometry>
       <material><ambient>0.7 0.45 0.3</ambient><diffuse>0.75 0.5 0.35</diffuse></material></visual></link></model>
 
-<!-- 斜坡 -->
+<!-- 斜坡 (保留1个) -->
 <model name="ramp_1"><static>true</static><pose>4 4 0.3 0 0.35 0</pose>
-  <link name="l"><collision name="c"><geometry><box><size>5 2 0.3</size></box></geometry></collision>
-    <visual name="v"><geometry><box><size>5 2 0.3</size></box></geometry>
-      <material><ambient>0.45 0.45 0.45</ambient><diffuse>0.55 0.55 0.55</diffuse></material></visual></link></model>
-<model name="ramp_2"><static>true</static><pose>-4 -4 0.3 0 -0.35 0</pose>
-  <link name="l"><collision name="c"><geometry><box><size>5 2 0.3</size></box></geometry></collision>
-    <visual name="v"><geometry><box><size>5 2 0.3</size></box></geometry>
-      <material><ambient>0.45 0.45 0.45</ambient><diffuse>0.55 0.55 0.55</diffuse></material></visual></link></model>
-<model name="ramp_3"><static>true</static><pose>8 -6 0.3 0 0.35 1.57</pose>
   <link name="l"><collision name="c"><geometry><box><size>5 2 0.3</size></box></geometry></collision>
     <visual name="v"><geometry><box><size>5 2 0.3</size></box></geometry>
       <material><ambient>0.45 0.45 0.45</ambient><diffuse>0.55 0.55 0.55</diffuse></material></visual></link></model>
 
 <!-- ====== 检测目标: 红色球体 (椅子不可见面, 球在 NE区货架旁) ====== -->
 <model name="target_ball"><static>true</static>
-  <pose>12 8 0.5 0 0 0</pose>
+  <pose>0.9 0 0.35 0 0 0</pose>
   <link name="ball">
     <visual name="v">
-      <geometry><sphere><radius>0.35</radius></sphere></geometry>
+      <geometry><sphere><radius>0.4</radius></sphere></geometry>
       <material><ambient>0.9 0.1 0.1</ambient><diffuse>0.9 0.1 0.1</diffuse></material>
     </visual>
   </link>
