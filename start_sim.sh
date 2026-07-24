@@ -1,11 +1,23 @@
 #!/bin/bash
 # ============================================================
-# Ball Robot 仿真 — 3 窗口一键启动
+# Ball Robot 仿真 — 一键编译+启动 (2窗口: 全栈 + 图像)
 # ============================================================
 WS="/home/c/fastlio_ws"
 
 source /opt/ros/jazzy/setup.bash
 source $WS/install/setup.bash 2>/dev/null || true
+
+echo "========================================"
+echo "  编译项目..."
+echo "========================================"
+cd $WS
+colcon build --symlink-install --packages-select robot_navigation robot_vision robot_bringup 2>&1 | tail -5
+if [ ${PIPESTATUS[0]} -ne 0 ]; then
+    echo "❌ 编译失败, 退出"
+    exit 1
+fi
+source $WS/install/setup.bash
+echo "✅ 编译成功"
 
 echo "清理旧进程..."
 # 用 pgrep + kill -9 确保100%杀死 (含 static_transform_publisher 防僵尸累积)
@@ -47,18 +59,8 @@ disown
 
 sleep 1
 
-# ── 窗口 3: WASD 键盘 ──
-gnome-terminal --title="WASD" -- bash -c "
-sleep 8
-echo 'WASD | W=前 S=后 A=右 D=左 Q=退出'
-python3 $WS/scripts/drive_control.py
-" &
-disown
-
-sleep 1
-
 echo "========================================"
-echo "  窗口 1: 全栈  |  窗口 2: 图像  |  窗口 3: 键盘"
+echo "  窗口 1: 全栈  |  窗口 2: 图像"
 echo "  Ctrl+C 关闭主栈"
 echo "========================================"
 

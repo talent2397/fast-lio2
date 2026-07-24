@@ -32,7 +32,7 @@ except ImportError:
 
 # Target definitions
 TARGET_CLASSES_YOLO = {32: 'sports ball', 56: 'chair'}
-YOLO_CONF_THRESH = 0.5  # 置信度阈值, <0.5忽略
+YOLO_CONF_THRESH = 0.3  # v22: 0.5→0.3, Gazebo渲染球体YOLO识别率低
 
 # HSV ranges for RED ball (双阈值融合, 红色在 H 两端: 0-10 & 160-180)
 # S_min=100 V_min=70: 过滤低饱和度/低亮度像素, 大幅减少误检
@@ -129,14 +129,29 @@ class YoloDetector(Node):
         red_dets, red_mask = self._detect_red_ball(hsv)
 
         for (cx, cy, bw, bh) in red_dets:
-            # 仅可视化, 不发布detection (HSV误检率太高)
+            # v22: HSV检测也发布到detection (仿真环境无其他红色物体, 可作为有效检测)
             x1, y1 = int(cx - bw/2), int(cy - bh/2)
             x2, y2 = int(cx + bw/2), int(cy + bh/2)
             cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 0, 255), 2)
-            cv2.putText(annotated, 'HSV(ignored)', (x1, max(y1-5, 10)),
+            cv2.putText(annotated, 'HSV(red ball)', (x1, max(y1-5, 10)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
             cv2.drawMarker(annotated, (int(cx), int(cy)), (0, 255, 255),
                            cv2.MARKER_CROSS, 10, 1)
+            # v22: 发布HSV检测结果(仿真中红色球体是唯一红色物体)
+            det2d = Detection2D()
+            det2d.header = msg.header
+            obj = ObjectHypothesisWithPose()
+            obj.hypothesis.class_id = 'red_ball_hsv'
+            obj.hypothesis.score = 0.8  # HSV检测置信度默认0.8
+            det2d.results.append(obj)
+            bbox = BoundingBox2D()
+            bbox.center = Pose2D()
+            bbox.center.position.x = cx
+            bbox.center.position.y = cy
+            bbox.size_x = bw
+            bbox.size_y = bh
+            det2d.bbox = bbox
+            det_array.detections.append(det2d)
 
         # --- YOLO (if available) ---
         if self.yolo is not None:

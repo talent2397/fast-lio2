@@ -1,4 +1,5 @@
-"""LiDAR-Camera 3D fusion — v6: 深度窗口 + 地面平面三角测量 双策略（借鉴 human_tracking）"""
+"""LiDAR-Camera 3D fusion — v7: 球心三角测量 + 异常值过滤 + EMA限速 + bbox边沿拒绝 + Gazebo odom坐标"""
+import math
 import numpy as np, cv2
 from cv_bridge import CvBridge
 from image_geometry import PinholeCameraModel
@@ -7,6 +8,7 @@ from rclpy.node import Node
 from rclpy.duration import Duration
 from std_msgs.msg import Header
 from sensor_msgs.msg import Image, CameraInfo, PointCloud2
+from nav_msgs.msg import Odometry
 from vision_msgs.msg import Detection2DArray
 from geometry_msgs.msg import Pose, PoseStamped, Point, Quaternion
 import message_filters
@@ -34,7 +36,13 @@ class LidarCameraFusion(Node):
         self.output_frame = 'robot/odom'
         self.cam = PinholeCameraModel(); self.cam_ok = False
         self.latest_img = None; self._cnt = 0
-        self._ema_pos = None; self._ema_alpha = 0.3
+        self._ema_pos = None; self._ema_alpha = 0.25  # v7: 0.5→0.25 防单次坏测量拉偏50%
+        self._ema_raw_count = 0      # v7: 累计有效测量次数(前几次用更高alpha快速初始化)
+        self._last_raw = None        # v7: 上一次原始测量(异常值检测用)
+
+        # v7: 改用Gazebo odometry计算camera→world变换(独立于FAST-LIO2 TF)
+        self.odom_pos = None; self.odom_yaw = 0.0  # Gazebo ground-truth pose
+        self.create_subscription(Odometry, '/robot/odom', self._odom_cb, 10)
 
         import tf2_ros
         self.tf_buf = tf2_ros.Buffer()
@@ -51,7 +59,7 @@ class LidarCameraFusion(Node):
 
         self.pub_tgt = self.create_publisher(PoseStamped, '/robot/target_pose', 10)
         self.pub_dbg = self.create_publisher(Image, '/robot/fusion_debug_img', 10)
-        self.get_logger().info('Fusion v6 (depth_window + ground_triangulation) ready')
+        self.get_logger().info('Fusion v7 (ball_center_triangulation + outlier_reject + EMA limit) ready')
 
     def _ci(self, m):
         if not self.cam_ok:
@@ -59,6 +67,31 @@ class LidarCameraFusion(Node):
             self.get_logger().info(f'Cam {m.width}x{m.height} frame={self.cam.tfFrame()}')
 
     def _img(self, m): self.latest_img = m
+
+    def _odom_cb(self, m):
+        p = m.pose.pose.position; q = m.pose.pose.orientation
+        self.odom_pos = np.array([p.x, p.y, p.z])
+        self.odom_yaw = math.atan2(2*(q.w*q.z+q.x*q.y), 1-2*(q.y*q.y+q.z*q.z))
+
+    def _cam_to_odom(self, pt_cam):
+        """v7: 用Gazebo odometry将点从camera_optical变换到world/odom
+        camera_optical: X=right, Y=down, Z=forward
+        camera_sensor(=robot convention): X=forward, Y=left, Z=up
+        TF optical→sensor: R*(x_o,y_o,z_o) = (z_o, -x_o, -y_o)_sensor
+        sensor→base_link: + (0.42, 0, 0.30)
+        base_link→odom: Gazebo odometry pose
+        """
+        x_c, y_c, z_c = pt_cam
+        # Step 1: camera_optical → base_link
+        # optical→sensor R: (z_o, -x_o, -y_o) + translation (0.42, 0, 0.30)
+        x_b = z_c + 0.42    # optical forward → base X
+        y_b = -x_c           # optical right → base -Y (right in left-handed robot frame)
+        z_b = -y_c + 0.30    # optical down → base -Z
+        # Step 2: base_link → odom (Gazebo odometry)
+        cy, sy = math.cos(self.odom_yaw), math.sin(self.odom_yaw)
+        x_o = self.odom_pos[0] + cy*x_b - sy*y_b
+        y_o = self.odom_pos[1] + sy*x_b + cy*y_b
+        return np.array([x_o, y_o])
 
     def _on_sync(self, cloud_msg, det_msg):
         self._cnt += 1
@@ -116,25 +149,29 @@ class LidarCameraFusion(Node):
                 self.pub_dbg.publish(self.bridge.cv2_to_imgmsg(dbg, 'bgr8'))
             except Exception: pass
 
-        # ── TF camera→odom ──
-        m_c2o = None
-        for ts in [stamp, rclpy.time.Time()]:
-            try:
-                m_c2o = tf_to_matrix(self.tf_buf.lookup_transform(self.output_frame, cam_fr, ts, Duration(seconds=1)))
-                break
-            except Exception: continue
-        if m_c2o is None: return
+        # ── v7: 用Gazebo odometry代替FAST-LIO2 TF做camera→odom变换 ──
+        if self.odom_pos is None: return  # odom未就绪时跳过
 
-        # ── 地面平面三角测量 (v6: 当LiDAR打不到球时, 用bbox底边+地面平面解算3D) ──
+        # ── 球心三角测量 (用球心像素+球高度平面求交) ──
         targets = []
+        BALL_HEIGHT = 0.35   # v7: 球心离地高度(仿真已知), 替换地面Z=0
+        CAM_HEIGHT = 0.50    # 相机离地高度
+        TARGET_DEPTH = CAM_HEIGHT - BALL_HEIGHT  # 0.15m — 球心在相机光轴下方距离
+
         for d in det_msg.detections:
             bb = d.bbox; bx,by = bb.center.position.x, bb.center.position.y
             bw,bh = bb.size_x, bb.size_y
             cid = d.results[0].hypothesis.class_id if d.results else '?'
             sc = d.results[0].hypothesis.score if d.results else 0.0
 
+            # v7: bbox边沿拒绝 — 如果球在图像边缘(clipped), 跳过(bbox不准确)
+            bbox_edge_margin = 15
+            if (bx - bw/2 < bbox_edge_margin or bx + bw/2 > self.cam.width - bbox_edge_margin or
+                by - bh/2 < bbox_edge_margin or by + bh/2 > self.cam.height - bbox_edge_margin):
+                continue  # 裁剪的bbox → 跳过
+
             # 策略1: LiDAR深度窗口
-            x1, y1 = bx-bw/2-30, by-bh/2-30  # 扩大30px
+            x1, y1 = bx-bw/2-30, by-bh/2-30
             x2, y2 = bx+bw/2+30, by+bh/2+30
             in_bbox = in_img & (u>=x1) & (u<=x2) & (v>=y1) & (v<=y2)
             n_in = int(np.sum(in_bbox))
@@ -145,26 +182,38 @@ class LidarCameraFusion(Node):
                 fg = depths <= d_min + self.depth_window
                 if np.sum(fg) >= self.min_points:
                     tgt_cam = np.median(pts_cam[in_bbox][fg], axis=0)
-                    tgt_odom = transform_pts(np.atleast_2d(tgt_cam), m_c2o)[0]
+                    tgt_odom = self._cam_to_odom(tgt_cam)
                     targets.append((cid, sc, tgt_odom[:2], tgt_cam[2], int(np.sum(fg)), 'lidar'))
                     continue
 
-            # 策略2: 地面平面三角测量
-            # 相机光学帧: x右 y下 z前. 地面在y=cam_height(摄像头离地≈0.50m)
-            foot_px_y = int(min(by + bh/2, self.cam.height - 1))
+            # 策略2: v7.1 地面三角测量 — 用bbox底边+地面平面 (比球心更稳定)
+            # bbox底边 ≈ 球触地点, 交地面得球正下方的XY (球就在正上方0.35m的Z处)
+            foot_px_y = int(min(by + bh*0.5, self.cam.height - 1))
             foot_px_x = int(min(max(bx, 0), self.cam.width - 1))
             ray = np.array(self.cam.projectPixelTo3dRay((foot_px_x, foot_px_y)))
-            cam_height = 0.50  # camera离地高度
-            if ray[1] > 0.01:  # 射线指向下方(地面)
-                t = cam_height / ray[1]
-                tgt_cam = ray * t  # 相机光学帧3D坐标
-                tgt_odom = transform_pts(np.atleast_2d(tgt_cam), m_c2o)[0]
-                targets.append((cid, sc, tgt_odom[:2], tgt_cam[2], 0, 'ground'))
-                if self._cnt % 20 == 1:
-                    self.get_logger().info(f'Ground-tri: foot=({foot_px_x},{foot_px_y}) '
-                                           f'ray_y={ray[1]:.2f} t={t:.1f}m '
-                                           f'tgt=({tgt_odom[0]:.1f},{tgt_odom[1]:.1f})')
-                continue
+            if ray[1] > 0.005:  # 射线指向下方
+                t = CAM_HEIGHT / ray[1]  # 交地面(Y=CAM_HEIGHT=0.50)
+                if 0.3 < t < 30.0:
+                    tgt_cam = ray * t  # 地面点在相机帧的3D坐标
+                    tgt_odom = self._cam_to_odom(tgt_cam)
+                    targets.append((cid, sc, tgt_odom, tgt_cam[2], 0, 'ground'))
+                    if self._cnt % 20 == 1:
+                        self.get_logger().info(f'Ground-tri: foot=({foot_px_x},{foot_px_y}) '
+                                               f'ray_y={ray[1]:.3f} t={t:.1f}m '
+                                               f'tgt=({tgt_odom[0]:.1f},{tgt_odom[1]:.1f})')
+                    continue
+
+            # 策略2b: 回退球心三角测量 (bbox底边不可用时)
+            center_px = (int(min(max(bx, 0), self.cam.width-1)),
+                        int(min(max(by, 0), self.cam.height-1)))
+            ray = np.array(self.cam.projectPixelTo3dRay(center_px))
+            if ray[1] > 0.005:
+                t = TARGET_DEPTH / ray[1]
+                if 0.3 < t < 50.0:
+                    tgt_cam = ray * t
+                    tgt_odom = self._cam_to_odom(tgt_cam)
+                    targets.append((cid, sc, tgt_odom, tgt_cam[2], 0, 'center'))
+                    continue
 
             # 策略3: 回退取最近LiDAR点深度
             if np.any(in_img):
@@ -172,16 +221,33 @@ class LidarCameraFusion(Node):
                 z_est = Z[in_img][d_idx]
                 z_est = max(z_est, 0.5)
                 tgt_cam = np.array([(bx-cx)*z_est/fx, (by-cy)*z_est/fy, z_est])
-                tgt_odom = transform_pts(np.atleast_2d(tgt_cam), m_c2o)[0]
+                tgt_odom = self._cam_to_odom(tgt_cam)
                 targets.append((cid, sc, tgt_odom[:2], z_est, 0, 'fallback'))
                 continue
 
-        # ── 发布 ──
+        # ── v7: 发布 (异常值过滤 + EMA限速 + 快速初始化) ──
         if targets:
             t = targets[0]
             raw = t[2]
-            if self._ema_pos is None: self._ema_pos = raw
-            else: self._ema_pos = 0.3*raw + 0.7*self._ema_pos
+
+            # v7: 异常值过滤 — 如果与EMA偏差>5m且已有>5次有效测量, 跳过
+            if self._ema_pos is not None and self._ema_raw_count > 5:
+                dev = math.hypot(raw[0]-self._ema_pos[0], raw[1]-self._ema_pos[1])
+                if dev > 5.0:
+                    self.get_logger().warn(f'Outlier rejected: raw=({raw[0]:.1f},{raw[1]:.1f}) '
+                                          f'dev={dev:.1f}m from ema=({self._ema_pos[0]:.1f},{self._ema_pos[1]:.1f})',
+                                          throttle_duration_sec=3.0)
+                    return  # 不发布, 不更新EMA
+
+            # v7: EMA更新 — 前5次用更高alpha快速初始化(0.6→0.25)
+            if self._ema_pos is None:
+                self._ema_pos = raw
+                self._ema_raw_count = 1
+            else:
+                effective_alpha = 0.6 if self._ema_raw_count < 5 else self._ema_alpha
+                self._ema_pos = effective_alpha*raw + (1-effective_alpha)*self._ema_pos
+                self._ema_raw_count += 1
+
             msg = PoseStamped(header=Header(stamp=cloud_msg.header.stamp, frame_id=self.output_frame),
                               pose=Pose(position=Point(x=float(self._ema_pos[0]), y=float(self._ema_pos[1])),
                                         orientation=Quaternion(w=1.0)))

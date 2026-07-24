@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-全自动探索导航 — v17: 速度解放+前沿细化+post_brake修复+禁区智能清理
-  v16基础: 前沿聚类修复+A*多备选+APF截断+stuck先退后冲+禁区1.5m
-  v17新增: MAX_V1.2+SPIN_SPD1.2+LOS8m+W_DIST0.4+FT_DENOM45
-           +聚类门槛5+pre_brake1.1m/底速0.25+禁区智能清理
-           +post_brake_full记录修复半程bug
+全自动探索导航 — v22: 震荡检测+前沿重规划防死循环+定期环视+HSV检测支持
+  v18基础: 持久化追踪+障碍绕行+引力增强
+  v21修复: 到达前沿3x3vst标记 + 全黑名不清vst→push + push加速
+  v22修复: 前沿重规划计数(3次→vst) + 震荡位置检测 + 定期环视找球
+           + push方向多样性 + vst软清理(50%) + YOLO置信度0.3+HSV启用
 """
 import math, time, heapq, numpy as np
 from collections import deque
@@ -12,11 +12,11 @@ from scipy import ndimage
 import rclpy
 
 FULL_CIRCLE = 2*math.pi; SPIN_TIMEOUT = 20.0
-MAX_V = 1.2; MAX_W = 2.0; GOAL_DIST = 2.0; SPIN_SPD = 1.2
+MAX_V = 1.5; MAX_W = 2.0; GOAL_DIST = 1.0; SPIN_SPD = 1.2
 
 K_REP = 1.0;   K_ATT = 1.5;   K_ANG = 1.8
 D_SAFE = 2.0;  D_BACK = 1.0
-W_GAIN = 2.0;  W_DIST = 0.4;  W_TURN = 1.5   # v17: W_DIST降到0.4 远方也可见
+W_GAIN = 2.0;  W_DIST = 0.1;  W_TURN = 1.5   # v21: W_DIST降到0.1 更偏好远处前沿
 
 # 多层安全
 PRE_BRAKE_DIST = 1.1    # 预减速(缩短,减少龟爬)
@@ -76,7 +76,18 @@ class AutoExplorer(Node):
         self._post_brake_full = 0.0         # v17: 记录post_brake初始时长
         self._acquire_start = 0.0          # v17.1: ACQUIRE开始时间
         self._acquire_cooldown_t = 0.0     # v17.2: ACQUIRE冷却计时(5s)
-        self._chase_start = 0.0            # v17.3: CHASE开始时间, 防冷启动误触发REACHED, 10s超时
+        self._chase_start = 0.0            # v17.3: CHASE开始时间, 防冷启动误触发REACHED
+        self._fusion_tgt_time = 0.0        # v18: fusion_tgt最后更新时间(用于保鲜检查)
+        self._chase_lost_since = 0.0       # v18: CHASE丢失检测的计时起点
+        self._chase_plan = []              # v18: CHASE障碍物绕行路径
+        self._chase_plan_target = None     # v18: CHASE路径目标点
+        self._chase_replan_needed = False  # v19: 到达路径终点立即重规划
+        self._stuck_check_t = 0.0          # v20: stuck时间窗口检测起点
+        self._stuck_check_pos = None       # v20: stuck检测的参考位置
+        self._frontier_attempts = {}       # v22: 前沿重规划计数 {(gx,gy): count}
+        self._recent_positions = deque(maxlen=30)  # v22: 近期位置记录(震荡检测)
+        self._target_scan_t = 0.0          # v22: 定期环视定时器
+        self._recent_push_dirs = deque(maxlen=5)   # v22: 近期push方向(去重)
 
         from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
         _map_qos = QoSProfile(depth=10, durability=DurabilityPolicy.TRANSIENT_LOCAL, reliability=ReliabilityPolicy.RELIABLE)
@@ -87,7 +98,7 @@ class AutoExplorer(Node):
         self.create_subscription(PoseStamped, '/robot/target_pose', self._tgt, 10)
         self.pub = self.create_publisher(Twist, '/robot/cmd_vel', 10)
         self.timer = self.create_timer(0.05, self._run)
-        self.get_logger().info('AutoExplorer v17 (speed+frontier+post_brake fix) 就绪')
+        self.get_logger().info('AutoExplorer v22 (oscillation fix+target scan+frontier counter) 就绪')
 
     def _scan(self, m):
         self.scan_ranges = m.ranges
@@ -98,8 +109,21 @@ class AutoExplorer(Node):
         self._odom_n += 1
         p = m.pose.pose.position
         if self._lp:
-            moved = math.hypot(p.x-self._lp[0], p.y-self._lp[1])
-            self._stuck += 0.05 if moved < 0.01 else -min(self._stuck, 0.05)
+            # v20: stuck时间窗口检测 (原per-odom导致FAST-LIO高频误判)
+            # 每~1秒累积检查: 1秒内总位移<0.15m → 才算stuck+1.0
+            if self._stuck_check_t <= 0:
+                self._stuck_check_t = time.time()
+                self._stuck_check_pos = self._lp
+            elapsed = time.time() - self._stuck_check_t
+            if elapsed > 1.0:
+                total_moved = math.hypot(p.x-self._stuck_check_pos[0],
+                                         p.y-self._stuck_check_pos[1])
+                if total_moved < 0.15:
+                    self._stuck += 1.0    # 过去1秒几乎没动
+                else:
+                    self._stuck = max(0.0, self._stuck - 0.5)  # 有运动→减stuck
+                self._stuck_check_t = time.time()
+                self._stuck_check_pos = (p.x, p.y)
         self._lp = (p.x, p.y); self.pose = p
         q = m.pose.pose.orientation
         y = math.atan2(2*(q.w*q.z+q.x*q.y), 1-2*(q.y*q.y+q.z*q.z))
@@ -109,7 +133,9 @@ class AutoExplorer(Node):
     def _map(self, m):
         self.map_info = m.info
         self.map = np.array(m.data, dtype=np.int8).reshape(m.info.height, m.info.width)
-    def _tgt(self, m): self.fusion_tgt = m
+    def _tgt(self, m):
+        self.fusion_tgt = m
+        self._fusion_tgt_time = time.time()
     def _det(self, m):
         if m.detections: self.last_det = self.get_clock().now()
     def _map_ready(self):
@@ -168,6 +194,7 @@ class AutoExplorer(Node):
                     loop = '(LOOP!)' if self._brake_count >= 2 else ''
                     self.get_logger().warn(f'HARD BRAKE! F={fm_wide:.2f}m #{self._brake_count} {loop}')
                 self._back_t = 1.2; self.path = []; self._stuck = 0.0
+                self._chase_plan = []; self._chase_plan_target = None  # v18: 刹车后重规划
                 self._force_straight_t = 0.0
                 c.linear.x = -0.5; c.angular.z = self._back_dir
                 return True
@@ -239,6 +266,107 @@ class AutoExplorer(Node):
         elif abs(err) < 0.2:
             v = max(v, 0.3)      # 小误差保底0.3m/s(v15:0.25)
         return v, w
+
+    # ═══ CHASE专用势场: 更强引力+更弱斥力 (v18) ═══
+    def _potential_field_chase(self, goal_wx, goal_wy):
+        """CHASE模式: K_ATT=2.5(原1.5), max_rep=5.0(原8.0), 后半球斥力减半"""
+        if self.scan_ranges is None or self._scan_valid < 5:
+            return 0.0, 0.0
+        n = len(self.scan_ranges); fx, fy = 0.0, 0.0
+        step = max(1, n // 360)
+        for i in range(0, n, step):
+            d = self.scan_ranges[i]
+            if not (0.5 < d < 30): continue
+            if math.isinf(d): continue
+            angle = -math.pi + i*(2.0*math.pi/n)
+            rel_to_front = math.atan2(math.sin(angle), math.cos(angle))
+            # 前半球±90°: 正常斥力; 后半球: 斥力减半 (更激进靠近目标)
+            if abs(rel_to_front) > math.pi * 0.5:
+                rear_factor = 0.3
+            else:
+                rear_factor = 1.0
+            ca, sa = math.cos(angle), math.sin(angle)
+            if d < D_BACK:       k = K_REP * 6.0 * rear_factor
+            elif d < D_SAFE:     k = K_REP * (D_SAFE/d)**2 * rear_factor
+            else:                k = K_REP * (D_SAFE/d) * 0.15 * rear_factor
+            k = min(k, 4.0 * rear_factor)  # 单点斥力截断(比普通模式更低)
+            fx -= k*ca; fy -= k*sa
+
+        rep_mag = math.hypot(fx, fy)
+        max_rep = 5.0  # v18: CHASE max_rep更低(普通8.0), 让引力主导
+        if rep_mag > max_rep:
+            fx *= max_rep / rep_mag
+            fy *= max_rep / rep_mag
+
+        cos_y, sin_y = math.cos(self.yaw), math.sin(self.yaw)
+        fx_world = fx * cos_y - fy * sin_y
+        fy_world = fx * sin_y + fy * cos_y
+
+        if goal_wx is not None and goal_wy is not None:
+            dx = goal_wx - self.pose.x; dy = goal_wy - self.pose.y
+            dist = math.hypot(dx, dy)
+            if dist > 0.1:
+                att_k = min(K_ATT * 1.7, K_ATT * 1.7 * dist / 4.0)  # v18: 1.7x引力
+                fx_world += att_k*dx/dist; fy_world += att_k*dy/dist
+
+        fm = math.hypot(fx_world, fy_world)
+        if fm < 0.02: return 0.0, 0.0
+        f_ang = math.atan2(fy_world, fx_world)
+        v = min(self._speed_limit, fm*0.8)  # v18: fm*0.8 (原0.7), 但尊重安全限速
+        err = f_ang - self.yaw; err = math.atan2(math.sin(err), math.cos(err))
+        w = max(-MAX_W, min(MAX_W, K_ANG*err))
+        if abs(err) > 0.8:
+            v *= 0.2; w = max(-MAX_W, min(MAX_W, 1.5*(1 if err>0 else -1)))
+        elif abs(err) < 0.2:
+            v = max(v, 0.35)      # v18: CHASE保底0.35m/s (原0.3)
+        return v, w
+
+    def _los_lookahead_chase(self):
+        """CHASE路径LOS前瞻 (复用_chase_plan)"""
+        if not self._chase_plan or self.map is None: return None
+        mi = self.map_info; r = mi.resolution; ox = mi.origin.position.x; oy = mi.origin.position.y
+        px, py = self.pose.x, self.pose.y
+        for i in range(len(self._chase_plan)-1, -1, -1):
+            wx, wy = self._chase_plan[i]; dist = math.hypot(wx-px, wy-py)
+            if dist < 0.8 and i > 0: continue
+            if dist > LOS_MAX: continue
+            if not self._line_collision(px, py, wx, wy): return (wx, wy)
+        for i in range(len(self._chase_plan)):
+            wx, wy = self._chase_plan[i]
+            if not self._line_collision(px, py, wx, wy): return (wx, wy)
+        return None
+
+    # ═══ 沿墙滑动绕行 (v19): A*失败时的fallback ═══
+    def _tangent_bypass(self, gx, gy, tp):
+        """沿障碍物边缘切线方向滑动, 偏置朝向球的方向"""
+        if self.scan_ranges is None or self._scan_valid < 5:
+            return gx, gy   # fallback to direct
+        n = len(self.scan_ranges); mid = n//2
+        # 球相对于机器人的角度
+        ball_ang = math.atan2(tp.y - self.pose.y, tp.x - self.pose.x)
+        ball_rel = math.atan2(math.sin(ball_ang - self.yaw),
+                             math.cos(ball_ang - self.yaw))  # 机器人前方=0
+
+        # 在前半球(±90°)找最开阔方向, 偏置朝向球的一侧
+        best_score = -999.0; best_angle = 0.0
+        for i in range(0, n, max(1, n//180)):
+            d = self.scan_ranges[i]
+            if not (0.5 < d < 30): d = 0.5
+            if math.isinf(d): d = 0.5
+            world_angle = -math.pi + i*2.0*math.pi/n
+            rel_angle = math.atan2(math.sin(world_angle), math.cos(world_angle))
+            # 只考虑前半球
+            if abs(rel_angle) > math.pi * 0.65:
+                continue
+            # 评分: 距离 + 朝向球的偏置 (球在左边→偏好左边)
+            toward_ball = -abs(rel_angle - ball_rel)  # 越接近球方向越好
+            score = d * 0.6 + toward_ball * 3.0
+            if score > best_score:
+                best_score = score; best_angle = world_angle
+
+        best_world = self.yaw + best_angle
+        return (self.pose.x + 5.0*math.cos(best_world),
+                self.pose.y + 5.0*math.sin(best_world))
 
     # ═══ A*/前沿/LOS ═══
     def _astar(self, sx, sy, gx, gy):
@@ -344,6 +472,17 @@ class AutoExplorer(Node):
         c = Twist(); now = time.time()
         self._speed_limit = MAX_V   # 每tick重置
 
+        # v22: 位置跟踪 (震荡检测用)
+        self._recent_positions.append((self.pose.x, self.pose.y))
+
+        # v22: 震荡检测 — 30个采样(~1.5s)内的位移范围<0.5m → 原地踏步
+        if len(self._recent_positions) >= 30:
+            xs = [p[0] for p in self._recent_positions]
+            ys = [p[1] for p in self._recent_positions]
+            span = math.hypot(max(xs)-min(xs), max(ys)-min(ys))
+            if span < 0.5 and self.state == 'EXPLORE' and self._force_straight_t <= 0:
+                self._stuck += 0.5  # v22: 加速stuck累积, 更快触发逃脱
+
         # ═══ 多层安全 (最高优先级, 永不屏蔽) ═══
         # 硬刹车后退中
         if self._back_t > 0:
@@ -388,15 +527,39 @@ class AutoExplorer(Node):
                     self._stuck_straight_pending = 0.0
                     self.get_logger().info('Post-brake→force_straight (stuck recovery)')
                 else:
-                    self._force_straight_dir = self.yaw
+                    # v18: CHASE模式下force_straight朝向目标
+                    if self.state == 'CHASE' and self.fusion_tgt is not None:
+                        tp = self.fusion_tgt.pose.position
+                        self._force_straight_dir = math.atan2(tp.y - self.pose.y, tp.x - self.pose.x)
+                        self.get_logger().info('Post-brake→CHASE redirect toward target')
+                    else:
+                        self._force_straight_dir = self.yaw
                     self._force_straight_t = 4.0
             self.pub.publish(c); return
 
-        # ── 目标检测 (v17.2: ACQUIRE超时+5s冷却) ──
-        det_fresh = False
+        # ── v22: 定期环视找球 (EXPLORE模式下每~20s快速旋转180°环视) ──
+        if self.state == 'EXPLORE' and self._force_straight_t <= 0 and self._back_t <= 0 and self._post_brake_t <= 0:
+            self._target_scan_t += 0.05
+            if self._target_scan_t > 20.0:
+                c.linear.x = 0.0; c.angular.z = 1.2
+                self.pub.publish(c)
+                if self._target_scan_t > 21.6:  # 旋转1.6s≈190°
+                    self._target_scan_t = 0.0
+                    self._stuck = max(0.0, self._stuck - 2.0)  # 环视后减stuck
+                    self.get_logger().info('Target scan done → resume explore')
+                return
+        elif self.state != 'EXPLORE':
+            self._target_scan_t = 0.0  # 非探索状态重置
+
+        # ── 目标检测 (v18: 10s超时+CHASE宽限期+fusion_tgt保鲜20s) ──
+        det_fresh = False; det_recent = False
         if self.last_det is not None:
             dt = (self.get_clock().now() - self.last_det).nanoseconds / 1e9
-            det_fresh = dt < 4.0
+            det_fresh = dt < 10.0     # v18: 放宽到10s (原4s, YOLO ~2Hz检测+转弯遮挡)
+            det_recent = dt < 20.0    # v18: 20s内有过检测, 用于fusion保鲜辅助
+
+        # fusion_tgt保鲜检查: 上次3D更新是否在20s内
+        tgt_fresh = (now - self._fusion_tgt_time) < 20.0 if self._fusion_tgt_time > 0 else False
 
         # ACQUIRE冷却: 上一次超时后5s内不重新进入
         if self._acquire_cooldown_t > 0:
@@ -425,16 +588,59 @@ class AutoExplorer(Node):
             if self._acquire_cooldown_t < 0.1:  # YOLO不再检测到球时快速结束冷却
                 self._acquire_cooldown_t = 0.0
 
+        # ── v18: CHASE进入/退出逻辑 (宽限期防短暂丢失) ──
         if det_fresh and self.fusion_tgt is not None:
             if self.state not in ('CHASE', 'REACHED'):
                 self.state = 'CHASE'; self.path = []; self._path_target = None
-                self._acquire_start = 0.0
-                self._stuck = 0.0
-                self._chase_start = now      # v17.3: 记录CHASE开始时间
+                self._acquire_start = 0.0; self._chase_lost_since = 0.0
+                self._stuck = 0.0; self._stuck_escalate = 0
+                self._chase_plan = []; self._chase_plan_target = None
+                self._chase_start = now
                 self.get_logger().info('→CHASE (target locked)')
-        elif not det_fresh and self.state == 'CHASE':
-            self.state = 'EXPLORE'; self.path = []; self._path_target = None
-            self.get_logger().info('CHASE→EXPLORE (target lost)')
+        elif self.state == 'CHASE':
+            # v18: 仅在YOLO丢失+fusion过期时才退出, 否则保持CHASE
+            if not det_fresh and not tgt_fresh:
+                # YOLO也丢了, fusion也过期了 (>20s) → 真正丢失
+                self.state = 'EXPLORE'; self.path = []; self._path_target = None
+                self._chase_lost_since = 0.0; self._chase_plan = []
+                self._stuck = 0.0; self._stuck_escalate = 0
+                self._bias_angle = None; self._no_ft_count = 0  # v18: 重置探索状态
+                self.get_logger().warn('CHASE→EXPLORE (target truly lost: no det+stale fusion)')
+            elif not det_fresh and tgt_fresh:
+                # YOLO短暂丢失但fusion位置还在 → 继续CHASE (宽限期)
+                if self._chase_lost_since <= 0:
+                    self._chase_lost_since = now
+                lost_dur = now - self._chase_lost_since
+                if lost_dur > 10.0:
+                    self.state = 'EXPLORE'; self.path = []; self._path_target = None
+                    self._chase_lost_since = 0.0; self._chase_plan = []
+                    self._stuck = 0.0; self._stuck_escalate = 0
+                    self._bias_angle = None; self._no_ft_count = 0  # v18: 重置探索状态
+                    self.get_logger().warn(f'CHASE→EXPLORE (YOLO lost {lost_dur:.0f}s, fusion stale soon)')
+            else:
+                # det_fresh恢复 → 重置宽限期
+                self._chase_lost_since = 0.0
+
+        # ── 强制直行 (所有状态通用: CHASE→朝目标, EXPLORE→朝原方向) ──
+        if self._force_straight_t > 0:
+            self._force_straight_t -= 0.05
+            # v18: CHASE模式朝向目标
+            if self.state == 'CHASE' and self.fusion_tgt is not None:
+                tp = self.fusion_tgt.pose.position
+                fdir = math.atan2(tp.y - self.pose.y, tp.x - self.pose.x)
+            else:
+                fdir = self._force_straight_dir
+            gx = self.pose.x + 5.0 * math.cos(fdir)
+            gy = self.pose.y + 5.0 * math.sin(fdir)
+            if self.state == 'CHASE':
+                v, w = self._potential_field_chase(gx, gy)
+            else:
+                v, w = self._potential_field(gx, gy)
+            c.linear.x = max(0.5, v)    # v21: 最低0.5 确保前进推力
+            c.angular.z = w             # 完整APF转向
+            if self._force_straight_t <= 0:
+                self.get_logger().info('force straight done')
+            self.pub.publish(c); return
 
         # ── SPIN_WAIT ──
         if self.state == 'SPIN_WAIT':
@@ -443,6 +649,7 @@ class AutoExplorer(Node):
             tmout = (now - self._spin_start) > SPIN_TIMEOUT
             if (spun and map_ok) or tmout:
                 self._stuck = 0.0; self._no_ft_count = 0; self._post_brake_t = 0.0; self.state = 'EXPLORE'
+                self._stuck_check_t = 0.0; self._stuck_check_pos = None  # v20: 重置检测窗口
                 free = np.count_nonzero(self.map == 0) if self.map is not None else 0
                 rsn = 'map_ok' if map_ok else f'timeout({now-self._spin_start:.0f}s)'
                 self.get_logger().info(f'→EXPLORE ({rsn}, spin={self._spin:.1f}rad, free={free})')
@@ -453,23 +660,70 @@ class AutoExplorer(Node):
                 self.get_logger().info(f'SPIN_WAIT: {self._spin:.1f}/{FULL_CIRCLE*1.2:.1f}rad free={fn}')
             c.angular.z = SPIN_SPD; self.pub.publish(c); return
 
-        # ── CHASE ──
+        # ── CHASE (v19: 沿墙滑动 + 到达重规划 + 更早避障) ──
         if self.state == 'CHASE':
+            self._stuck = max(0.0, self._stuck - 0.1)
+            self._stuck_escalate = 0
+
             if self.fusion_tgt is None:
                 c.linear.x = 0.0; c.angular.z = 0.35; self.pub.publish(c); return
             tp = self.fusion_tgt.pose.position
             d = math.hypot(tp.x-self.pose.x, tp.y-self.pose.y)
-            # v17.3: 至少跟踪3s+目标距起点>3m才允许REACHED, 防fusion冷启动误触发
             chase_dur = now - self._chase_start if self._chase_start > 0 else 0
-            init_dist = math.hypot(tp.x - (self._lp[0] if self._lp else tp.x),
-                                   tp.y - (self._lp[1] if self._lp else tp.y)) if self._lp else 0
             if d < GOAL_DIST and chase_dur > 3.0:
+                # v22: 抵达验证 — 记录机器人实际位置和目标EMA位置, 供调试
+                self.get_logger().info(f'REACHED: robot=({self.pose.x:.2f},{self.pose.y:.2f}) '
+                                       f'target=({tp.x:.2f},{tp.y:.2f}) d={d:.2f}m chase_dur={chase_dur:.1f}s')
                 self.state = 'REACHED'; self.pub.publish(Twist())
                 self.get_logger().info(f'到达! {d:.1f}m'); return
             ang_tgt = math.atan2(tp.y-self.pose.y, tp.x-self.pose.x)
             gx = tp.x - GOAL_DIST*math.cos(ang_tgt)
             gy = tp.y - GOAL_DIST*math.sin(ang_tgt)
-            v, w = self._potential_field(gx, gy)
+
+            # v19: 前方有障碍时的绕过决策
+            blocked = self._front_min < 2.0      # v19: 更早触发(原1.5)
+            hard_blocked = self._front_min < 1.2  # v19: 严重阻挡
+            need_bypass = blocked and d > GOAL_DIST + 0.5
+            need_replan = (not self._chase_plan or
+                          now - self._fplan_t > 4.0 or  # v19: 更频繁重规划(原8s)
+                          getattr(self, '_chase_replan_needed', False))
+
+            if need_bypass and self._map_ready():
+                if need_replan:
+                    self._chase_replan_needed = False
+                    rw = self._astar(self.pose.x, self.pose.y, gx, gy)
+                    if rw and len(rw) > 2:
+                        self._chase_plan = rw
+                        self._chase_plan_target = rw[-1]
+                        self._fplan_t = now
+                        self.get_logger().info(
+                            f'CHASE A* {len(rw)}pts → ({gx:.1f},{gy:.1f}) F={self._front_min:.1f}m')
+                    else:
+                        self._chase_plan = []
+
+                if self._chase_plan and self._chase_plan_target:
+                    los = self._los_lookahead_chase()
+                    if los:
+                        gx_use, gy_use = los
+                    else:
+                        gx_use, gy_use = self._chase_plan_target
+                    # v19: 到达路径终点 → 标记立即重规划(不清除路径, 下个tick重规划)
+                    dtg_plan = math.hypot(self._chase_plan_target[0]-self.pose.x,
+                                          self._chase_plan_target[1]-self.pose.y)
+                    if dtg_plan < 1.0:
+                        self._chase_replan_needed = True
+                else:
+                    # v19: A*失败 → 沿墙滑动 (面向目标侧向, 沿开放方向走)
+                    gx_use, gy_use = self._tangent_bypass(gx, gy, tp)
+            elif hard_blocked and not self._map_ready():
+                # v19: 地图未就绪但被硬阻挡 → 沿墙滑动
+                gx_use, gy_use = self._tangent_bypass(gx, gy, tp)
+            else:
+                self._chase_plan = []; self._chase_plan_target = None
+                self._chase_replan_needed = False
+                gx_use, gy_use = gx, gy
+
+            v, w = self._potential_field_chase(gx_use, gy_use)
             c.linear.x = v; c.angular.z = w; self.pub.publish(c); return
 
         # ── REACHED ──
@@ -523,25 +777,14 @@ class AutoExplorer(Node):
                 self.get_logger().warn(f'THRASH detected! force straight {self._force_straight_dir:.1f}rad')
             self._thrash_w.clear(); self._thrash_t = 0.0
 
-        # ── 强制直行 (保持完整APF转向, 只偏置引力方向) ──
-        if self._force_straight_t > 0:
-            self._force_straight_t -= 0.05
-            gx = self.pose.x + 5.0 * math.cos(self._force_straight_dir)
-            gy = self.pose.y + 5.0 * math.sin(self._force_straight_dir)
-            v, w = self._potential_field(gx, gy)
-            c.linear.x = max(0.3, v)    # 最低0.3 确保前进推力
-            c.angular.z = w             # 完整APF转向 (v14: w*0.3 太危险)
-            if self._force_straight_t <= 0:
-                self.get_logger().info('force straight done')
-            self.pub.publish(c); return
-
         # ── 前沿路径跟随 ──
         if self.path and self._path_target:
-            if self._stuck > 3.0 or (now - self._fplan_t) > 20.0:
-                self.get_logger().warn(f'路径不通, 放弃 (stuck={self._stuck:.1f})')
+            if self._stuck > 8.0 or (now - self._fplan_t) > 25.0:
+                self.get_logger().warn(f'路径不通, 放弃 (stuck={self._stuck:.1f}s ttl={now-self._fplan_t:.0f}s)')
                 self.path = []; self._path_target = None
                 if self._last_goal: self._vst.add(self._last_goal)
                 self._stuck = 0.0
+                self._stuck_check_t = 0.0; self._stuck_check_pos = None  # v20: 重置窗口
                 self._fplan_t = 0.0    # v17.3: 强制立即重规划, 消除0.5s停顿
             else:
                 los = self._los_lookahead()
@@ -551,13 +794,22 @@ class AutoExplorer(Node):
                 dtg = math.hypot(self._path_target[0]-self.pose.x, self._path_target[1]-self.pose.y)
                 if dtg < 1.0 and (now - self._fplan_t) > 2.0:
                     self.path = []; self._path_target = None
-                    if self._last_goal: self._vst.add(self._last_goal)
+                    # v22: 到达前沿→标记3x3网格, 并清除该前沿的重规划计数
+                    if self._last_goal:
+                        gx_cell, gy_cell = self._last_goal
+                        for dcx in [-1, 0, 1]:
+                            for dcy in [-1, 0, 1]:
+                                self._vst.add((gx_cell+dcx, gy_cell+dcy))
+                        # v22: 到达后清除尝试计数
+                        self._frontier_attempts.pop((gx_cell, gy_cell), None)
                     self.get_logger().info(f'到达前沿 #{self._cnt}')
                     self._stuck = 0.0; self._brake_count = 0; self._stuck_escalate = 0
+                    self._stuck_check_t = 0.0; self._stuck_check_pos = None
                     self._bias_angle = None
+                    self._target_scan_t = 0.0   # v22: 到达前沿后重置环视计时
             self.pub.publish(c); return
 
-        # ── 前沿规划 ──
+        # ── 前沿规划 (v22: 重规划计数+防止死循环) ──
         los_recent = (now - self._los_fail_t) < 1.0
         need_replan = ((self._path_target is None and not los_recent) or
                        now - self._fplan_t > 12.0)
@@ -569,6 +821,12 @@ class AutoExplorer(Node):
                 for wx, wy, size in clusters:
                     mk = (round(wx/1.5), round(wy/1.5))
                     if mk in self._vst: continue
+                    # v22: 重规划≥3次的前沿→加入vst, 防止死循环
+                    if self._frontier_attempts.get(mk, 0) >= 3:
+                        self._vst.add(mk)
+                        self.get_logger().info(f'Frontier {mk} attempted 3x → blacklisted',
+                                              throttle_duration_sec=3.0)
+                        continue
                     scored.append((self._score_frontier(wx, wy, size), wx, wy, mk, size))
                 if scored:
                     scored.sort(reverse=True)
@@ -581,23 +839,26 @@ class AutoExplorer(Node):
                             self._cnt += 1; self._stuck = 0.0; self._no_ft_count = 0
                             self._spin_scan_t = 0.0
                             self._fplan_t = now; self._los_fail_t = 0.0; self._last_goal = mk
-                            self.get_logger().info(f'→({gx:.1f},{gy:.1f}) d={math.hypot(gx-self.pose.x,gy-self.pose.y):.1f}m sz={size} #{self._cnt}  r={rank}')
+                            # v22: 记录前沿尝试次数
+                            self._frontier_attempts[mk] = self._frontier_attempts.get(mk, 0) + 1
+                            self.get_logger().info(f'→({gx:.1f},{gy:.1f}) d={math.hypot(gx-self.pose.x,gy-self.pose.y):.1f}m sz={size} #{self._cnt}  r={rank} at={self._frontier_attempts[mk]}')
                             self.pub.publish(c); found = True
                             break
                     if found: return
                 else:
-                    # v17: 有前沿但全在黑名单→周围探索完毕, 主动清禁区
-                    self._vst.clear()
-                    self.get_logger().info('All frontiers blacklisted → _vst cleared')
+                    # v21: 全在黑名单→push探索到新区域(不清vst, 自然扩展地图)
+                    self.get_logger().info(f'All frontiers blacklisted → push (vst={len(self._vst)})',
+                                           throttle_duration_sec=5.0)
             self._no_ft_count += 1
 
         # ── stuck 处理 (v16: 先退后冲, 避免顶墙) ──
-        if self._stuck > 5.0 and self._post_brake_t <= 0 and self._back_t <= 0:
+        if self._stuck > 8.0 and self._post_brake_t <= 0 and self._back_t <= 0:
             self._stuck_escalate += 1
             esc = self._stuck_escalate
             self.get_logger().warn(f'stuck={self._stuck:.1f}s esc={esc} → escape')
             self._bias_angle = self.yaw
             self._stuck = 0.0; self.path = []; self._no_ft_count = 3
+            self._stuck_check_t = 0.0; self._stuck_check_pos = None  # v20: 重置窗口
 
             if esc >= 3:
                 if self.pose is not None:
@@ -628,8 +889,21 @@ class AutoExplorer(Node):
                 self._spin_scan_t += 0.05
                 self._spin_scan_total += 0.05
                 if self._spin_scan_t > 8.0:
-                    self._vst.clear(); self._no_ft_count = 0; self._spin_scan_t = 0.0
-                    self.get_logger().info('spin-scan: _vst cleared, retry')
+                    # v22: soft-clear vst — 保留50%防止立即回到已探索区域
+                    if len(self._vst) > 20:
+                        keep = list(self._vst)[:len(self._vst)//2]
+                        self._vst.clear()
+                        for k in keep:
+                            self._vst.add(k)
+                        self.get_logger().info(f'spin-scan: _vst soft-clear kept {len(self._vst)}')
+                    else:
+                        self._vst.clear()
+                        self.get_logger().info('spin-scan: _vst cleared, retry')
+                    # v22: 也清理旧的前沿尝试记录
+                    old_keys = [k for k, v in self._frontier_attempts.items() if v >= 2]
+                    for k in old_keys:
+                        del self._frontier_attempts[k]
+                    self._no_ft_count = 0; self._spin_scan_t = 0.0
                 if self._spin_scan_total > 12.0:
                     best_dir = self.yaw
                     if self.scan_ranges is not None and self._scan_valid > 5:
@@ -652,15 +926,23 @@ class AutoExplorer(Node):
                 gx = self.pose.x + 5.0 * math.cos(self._scan_push_dir)
                 gy = self.pose.y + 5.0 * math.sin(self._scan_push_dir)
                 v, w = self._potential_field(gx, gy)
-                c.linear.x = max(0.3, v)    # 最低0.3 确保前进推力
+                c.linear.x = max(0.7, v)    # v21: 最低0.7 更积极push
                 c.angular.z = w             # 完整APF (v14:未限制)
                 if self._scan_push_t <= 0:
-                    self._vst.clear(); self._no_ft_count = 0
+                    # v22: soft-clear vst (保留50%)
+                    if len(self._vst) > 20:
+                        keep = list(self._vst)[:len(self._vst)//2]
+                        self._vst.clear()
+                        for k in keep: self._vst.add(k)
+                    else:
+                        self._vst.clear()
+                    self._no_ft_count = 0
                     self._bias_angle = None
+                    self._stuck = 0.0; self._stuck_check_t = 0.0; self._stuck_check_pos = None
                     self.get_logger().info('spin-scan escape done → EXPLORE')
                 self.pub.publish(c); return
 
-            # push 模式: 0.5s防抖 + 5m远处目标
+            # push 模式: 0.5s防抖 + 5m远处目标 + v22方向多样性
             if now - self._push_tgt_t > 0.5:
                 if self.scan_ranges is not None and self._scan_valid > 5:
                     n = len(self.scan_ranges); mid = n//2
@@ -676,10 +958,20 @@ class AutoExplorer(Node):
                             err = abs(math.atan2(math.sin(w_angle - self._bias_angle),
                                                  math.cos(w_angle - self._bias_angle)))
                             bias_penalty = max(0, 1.0 - err/math.pi) * 10.0
-                        score = d - bias_penalty
+                        # v22: 近期push方向惩罚 (防止反复走同一边)
+                        recent_penalty = 0.0
+                        world_dir = self.yaw + w_angle
+                        for recent_dir in self._recent_push_dirs:
+                            diff = abs(math.atan2(math.sin(world_dir - recent_dir),
+                                                  math.cos(world_dir - recent_dir)))
+                            if diff < 0.5:  # ~30°内
+                                recent_penalty += 5.0 * (1.0 - diff/0.5)
+                        score = d - bias_penalty - recent_penalty
                         if score > best_score:
                             best_score = score; best_i = i%n
                     self._push_tgt = self.yaw + (-math.pi + best_i*2.0*math.pi/n)
+                    # v22: 记录push方向
+                    self._recent_push_dirs.append(self._push_tgt)
                 else:
                     self._push_tgt = self.yaw
                 self._push_tgt_t = now
@@ -691,7 +983,8 @@ class AutoExplorer(Node):
                 gx_tgt = self.pose.x + 5.0*math.cos(self.yaw)
                 gy_tgt = self.pose.y + 5.0*math.sin(self.yaw)
             v, w = self._potential_field(gx_tgt, gy_tgt)
-            c.linear.x = v; c.angular.z = w; self.pub.publish(c); return
+            c.linear.x = max(0.6, v); c.angular.z = w  # v21: push保底0.6m/s
+            self.pub.publish(c); return
 
         # ── 兜底 ──
         fwd_angle = self.yaw
